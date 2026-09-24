@@ -37,8 +37,19 @@ export default class AiRewritePlugin extends Plugin {
 			id: 'cancel-rewrite',
 			name: '取消正在进行的 AI 改写',
 			checkCallback: (checking) => {
-				if (!this.session || this.session.status === 'prompt') return false;
-				if (!checking) this.cancel(this.session);
+				if (this.session) {
+					if (this.session.status === 'prompt') return false;
+					if (!checking) this.cancel(this.session);
+					return true;
+				}
+				const orphaned = [...this.views].filter((view) => view.state.field(lockedRange, false));
+				if (!orphaned.length) return false;
+				if (!checking) {
+					for (const view of orphaned) view.dispatch({ effects: clearLock.of(undefined) });
+					if (orphaned.some((view) => view.state.field(lockedRange, false))) {
+						new Notice('预览未能清除，请重启 Obsidian 并重新打开笔记');
+					}
+				}
 				return true;
 			},
 		});

@@ -35,6 +35,8 @@ class PreviewWidget extends WidgetType {
 export const lockedRange = StateField.define<LockedRange | null>({
 	create: () => null,
 	update(value, tr) {
+		// Rule: 应用结果和预览清理必须属于同一事务；即使宿主过滤掉 effect 也不能留下待确认卡片。
+		if (tr.annotation(ownApply)) return null;
 		let next = value && {
 			...value,
 			from: tr.changes.mapPos(value.from, 1),
@@ -86,4 +88,8 @@ export function applyLocked(view: EditorView, original: string, replacement: str
 		effects: clearLock.of(undefined),
 		annotations: [ownApply.of(true), isolateHistory.of('full')],
 	});
+	if (view.state.field(lockedRange) !== null ||
+		view.state.doc.sliceString(range.from, range.from + replacement.length) !== replacement) {
+		throw new Error('正文应用或预览清理未完成，请检查笔记内容并取消本次改写');
+	}
 }

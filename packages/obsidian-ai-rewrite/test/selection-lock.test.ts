@@ -66,6 +66,20 @@ test('discard and failed requests never alter the source', () => {
 	assert.equal(undo(view as unknown as EditorView), false);
 });
 
+test('confirmation cannot leave a review card after host strips effects from a document transaction', () => {
+	const view = {
+		state: EditorState.create({ doc: '原文', extensions: [selectionGuard, history()] }),
+		dispatch: (spec: Parameters<EditorView['dispatch']>[0]) => {
+			// 模拟宿主保留文档变更和注解，却丢弃随变更附带的 effect。
+			view.state = view.state.update('changes' in spec ? { ...spec, effects: [] } : spec).state;
+		},
+	};
+	view.dispatch({ effects: setLock.of({ from: 0, to: 2, phase: 'review', preview: '新文' }) });
+	applyLocked(view as unknown as EditorView, '原文', '新文');
+	assert.equal(view.state.doc.toString(), '新文');
+	assert.equal(view.state.field(lockedRange), null);
+});
+
 test('external bypass that changes original is rejected instead of overwritten', () => {
 	const view = holder();
 	view.dispatch({ effects: setLock.of({ from: 4, to: 10, phase: 'review', preview: '完整' }) });

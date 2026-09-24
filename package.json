@@ -4,6 +4,7 @@
   "workspaces": ["packages/*"],
   "scripts": {
     "build": "npm run build -w packages/obsidian-ai-rewrite",
+    "install:obsidian": "npm run build && node scripts/install-obsidian-plugin.mjs",
     "lint": "npm run lint -w packages/obsidian-ai-rewrite",
     "test": "npm run test -w packages/obsidian-ai-rewrite"
   }

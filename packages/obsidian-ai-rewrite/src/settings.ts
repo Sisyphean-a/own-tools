@@ -1,16 +1,20 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
 import type AiRewritePlugin from './main';
 
+export type ReasoningEffort = 'default' | 'none' | 'low' | 'high' | 'max';
+
 export interface AiSettings {
 	endpoint: string;
 	apiKey: string;
 	model: string;
+	reasoningEffort: ReasoningEffort;
 }
 
 export const DEFAULT_SETTINGS: AiSettings = {
 	endpoint: 'https://api.deepseek.com/chat/completions',
 	apiKey: '',
 	model: 'deepseek-flash',
+	reasoningEffort: 'default',
 };
 
 export class AiSettingTab extends PluginSettingTab {
@@ -39,6 +43,17 @@ export class AiSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.model)
 				.onChange(async (value) => {
 					this.plugin.settings.model = value.trim();
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName('思考等级')
+			.setDesc('服务默认不传控制参数（默认接口为高）；极高可能耗时更久。自定义接口需支持 reasoning_effort，否则请求会报错。思维链不会写入笔记。')
+			.addDropdown((dropdown) => dropdown
+				.addOptions({ default: '服务默认', none: '关闭', low: '低', high: '高', max: '极高' })
+				.setValue(this.plugin.settings.reasoningEffort)
+				.onChange(async (value) => {
+					if (value !== 'default' && value !== 'none' && value !== 'low' && value !== 'high' && value !== 'max') return;
+					this.plugin.settings.reasoningEffort = value;
 					await this.plugin.saveSettings();
 				}));
 		new Setting(containerEl)

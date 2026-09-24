@@ -6,9 +6,9 @@
 
 ## 本地安装与升级
 
-在仓库根运行 `npm install && npm run build`。将 `packages/obsidian-ai-rewrite/` 下的 `main.js`、`manifest.json`、`styles.css` 覆盖到笔记库 `.obsidian/plugins/obsidian-ai-rewrite/`，然后在 **设置 → 第三方插件** 中重新加载或重新启用插件。
+在仓库根先运行 `npm install`，然后运行 `npm run install:obsidian`：它会先构建，再将 `main.js`、`manifest.json`、`styles.css` 安装到当前系统用户的 `Documents/Obsidian Vault/.obsidian/plugins/obsidian-ai-rewrite/`，不写死用户名；不会修改 `data.json`。安装前在仓库 `.tmp/obsidian-plugin-backup/` 备份原有三个文件，失败时自动恢复。如果另一台电脑的笔记库路径不同，使用 `npm run install:obsidian -- --plugin-dir "完整插件目录"`；目标目录必须已存在且插件 ID 匹配。安装后在 **设置 → 第三方插件** 中重新加载或重新启用插件（必要时重启 Obsidian）。
 
-首次安装默认使用 DeepSeek `https://api.deepseek.com/chat/completions`、`deepseek-flash`，需填写 DeepSeek API 密钥；兼容支持流式 SSE、图片内容块和跨域访问的其他 Chat Completions 接口。旧版的接口、模型、密钥不会自动迁移，若原来配置了其他服务，请自行确认当前设置。提交时只将指令、所选文字及**主动粘贴的图片**发送到配置的服务；不会发送全文或文件名。图片仅保存在本次对话内存，不写入笔记库；每张上限 32 MiB，请求体上限 48 MiB（DeepSeek 的限制）。其他模型可能不支持图片，错误会直接提示，不会悄悄丢弃图片。
+首次安装默认使用 DeepSeek `https://api.deepseek.com/chat/completions`、`deepseek-flash`，需填写 DeepSeek API 密钥；兼容支持流式 SSE、图片内容块和跨域访问的其他 Chat Completions 接口。旧版的接口、模型、密钥不会自动迁移，若原来配置了其他服务，请自行确认当前设置。设置中的 **思考等级** 提供“服务默认 / 关闭 / 低 / 高 / 极高”：默认不传控制参数，原有配置不变；明确选档后才发送 Chat Completions 的 `reasoning_effort`（分别为 `none / low / high / max`）。DeepSeek 默认启用高强度思考；极高可能延长响应并增加费用，其他服务需自行支持该字段，否则请求会报错。模型的 `reasoning_content` 不显示、不写入笔记；参考 [DeepSeek 思考模式文档](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode)。提交时只将指令、所选文字及**主动粘贴的图片**发送到配置的服务；不会发送全文或文件名。图片仅保存在本次对话内存，不写入笔记库；每张上限 32 MiB，请求体上限 48 MiB（DeepSeek 的限制）。其他模型可能不支持图片，错误会直接提示，不会悄悄丢弃图片。
 
 密钥保存在插件 `data.json`，为**明文且可能被笔记库同步**；请勿分享，泄漏后应轮换。锁定仅拦截本编辑器中的普通事务，不阻止其他插件、外部同步或磁盘编辑；应用前会核对文件与选区内容，防止覆盖不相关修改。若内容变化，对比框仍可复制结果，不会强行应用。
 
