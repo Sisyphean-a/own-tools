@@ -1,0 +1,10 @@
+{
+  "name": "own-tools",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "npm run build -w packages/obsidian-ai-rewrite",
+    "lint": "npm run lint -w packages/obsidian-ai-rewrite",
+    "test": "npm run test -w packages/obsidian-ai-rewrite"
+  }
+}

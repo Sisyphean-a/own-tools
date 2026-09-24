@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-ai-rewrite",
+  "name": "AI Selection Rewrite",
+  "version": "0.2.0",
+  "minAppVersion": "1.0.0",
+  "description": "Stream AI rewrites into a protected selection from a command or context menu.",
+  "author": "own-tools",
+  "isDesktopOnly": false
+}
