@@ -1,26 +1,28 @@
 import { EditorView } from '@codemirror/view';
-import { Editor, MarkdownFileInfo, Notice, Plugin, TFile, editorInfoField } from 'obsidian';
+import { Editor, MarkdownFileInfo, MarkdownView, Notice, Plugin, TFile, editorInfoField } from 'obsidian';
 import { streamRewrite, validateSettings } from './ai';
-import { createSelectionExtension } from './editor-views';
+import { DiffModal } from './diff-modal';
+import { createSelectionExtension, findEditorView } from './editor-views';
 import { PromptModal } from './prompt-modal';
-import { appendLocked, clearLock, finishLocked, lockedRange, restoreLocked, setLock } from './selection-lock';
+import { applyLocked, clearLock, lockedRange, setLock } from './selection-lock';
 import { AiSettingTab, DEFAULT_SETTINGS, type AiSettings } from './settings';
 
 interface RewriteSession {
 	editor: Editor;
 	view: EditorView;
 	file: TFile;
+	info: MarkdownFileInfo;
 	original: string;
-	current: string;
-	status: 'prompt' | 'stream';
-	controller: AbortController | null;
+	status: 'prompt' | 'stream' | 'review';
 }
 
 export default class AiRewritePlugin extends Plugin {
 	settings!: AiSettings;
-	private views = new Map<Editor, EditorView>();
-	private modal: PromptModal | null = null;
+	private views = new Set<EditorView>();
+	private prompt: PromptModal | null = null;
+	private review: DiffModal | null = null;
 	private session: RewriteSession | null = null;
+	private controller: AbortController | null = null;
 
 	async onload(): Promise<void> {
 		this.settings = { ...DEFAULT_SETTINGS, ...await this.loadData() as Partial<AiSettings> };
@@ -28,26 +30,25 @@ export default class AiRewritePlugin extends Plugin {
 		this.addSettingTab(new AiSettingTab(this.app, this));
 		this.addCommand({
 			id: 'rewrite-selection',
-			name: '用 AI 改写选中文字',
+			name: '用 AI 改写或生成内容',
 			editorCallback: (editor: Editor, info: MarkdownFileInfo) => this.openPrompt(editor, info),
 		});
 		this.addCommand({
 			id: 'cancel-rewrite',
 			name: '取消正在进行的 AI 改写',
 			checkCallback: (checking) => {
-				if (this.session?.status !== 'stream') return false;
-				if (!checking) this.cancel(this.session, '改写已取消，原文已恢复');
+				if (!this.session || this.session.status === 'prompt') return false;
+				if (!checking) this.cancel(this.session);
 				return true;
 			},
 		});
 		this.registerEvent(this.app.workspace.on('editor-menu', (menu, editor, info) => {
-			if (!editor.somethingSelected() || editor.listSelections().length !== 1) return;
 			menu.addItem((item) => item.setTitle('使用AI改写').setIcon('sparkles')
 				.onClick(() => this.openPrompt(editor, info)));
 		}));
 		this.registerEvent(this.app.workspace.on('file-open', (file) => {
 			if (this.session && (file !== this.session.file || !this.valid(this.session))) {
-				this.cancel(this.session, '文件已切换，改写已取消');
+				this.cancel(this.session);
 			}
 		}));
 	}
@@ -57,13 +58,15 @@ export default class AiRewritePlugin extends Plugin {
 	}
 
 	private valid(session: RewriteSession): boolean {
-		return this.session === session && this.views.get(session.editor) === session.view &&
-			session.view.state.field(editorInfoField, false)?.file === session.file;
+		const cm = (session.editor as Editor & { cm?: EditorView }).cm;
+		const file = session.view.state.field(editorInfoField, false)?.file;
+		return this.session === session && (this.views.has(session.view) || cm === session.view) &&
+			(file === session.file || (!file && session.info.file === session.file && session.view.dom.isConnected));
 	}
 
 	private openPrompt(editor: Editor, info: MarkdownFileInfo): void {
 		if (this.session) {
-			new Notice('请先完成或取消当前改写');
+			new Notice('请先完成或取消当前生成');
 			return;
 		}
 		const problem = validateSettings(this.settings);
@@ -71,85 +74,95 @@ export default class AiRewritePlugin extends Plugin {
 			new Notice(problem);
 			return;
 		}
-		const view = this.views.get(editor);
 		const file = info.file;
-		if (!file || !view || view.state.field(editorInfoField, false)?.file !== file ||
-			view.state.field(lockedRange) || editor.listSelections().length !== 1 || !editor.somethingSelected()) {
-			new Notice('请在 Markdown 编辑器中选中一段文字');
+		const view = findEditorView(this.views, editor, info, this.app.workspace.getActiveViewOfType(MarkdownView));
+		if (!file || !view) {
+			new Notice('无法定位当前 Markdown 编辑器，请切换到编辑模式重试');
+			return;
+		}
+		if (editor.listSelections().length !== 1) {
+			new Notice('暂不支持多个选区，请只保留一个光标或选区');
 			return;
 		}
 		const from = editor.posToOffset(editor.getCursor('from'));
 		const to = editor.posToOffset(editor.getCursor('to'));
-		const original = editor.getSelection();
-		if (from === to || view.state.doc.sliceString(from, to) !== original) {
-			new Notice('选区已变化，请重新选中');
+		const original = editor.getRange(editor.getCursor('from'), editor.getCursor('to'));
+		if (view.state.field(lockedRange) || view.state.doc.sliceString(from, to) !== original) {
+			new Notice('选区与当前笔记不一致，请重新选择后重试');
 			return;
 		}
-		const session: RewriteSession = { editor, view, file, original, current: original, status: 'prompt', controller: null };
-		view.dispatch({ effects: setLock.of({ from, to, busy: false }) });
+		const session: RewriteSession = { editor, view, file, info, original, status: 'prompt' };
+		view.dispatch({ effects: setLock.of({ from, to, phase: 'prompt', preview: '' }) });
 		this.session = session;
-		const modal = new PromptModal(this.app, (instruction) => {
-			void this.submit(session, instruction);
+		const modal = new PromptModal(this.app, !!original, (instruction, images) => {
+			void this.submit(session, instruction, images);
 		}, (submitted) => {
-			if (this.modal === modal) this.modal = null;
+			if (this.prompt === modal) this.prompt = null;
 			if (!submitted && this.session === session) this.cancel(session);
 		});
-		this.modal = modal;
+		this.prompt = modal;
 		modal.open();
 	}
 
-	private async submit(session: RewriteSession, instruction: string): Promise<void> {
+	private async submit(session: RewriteSession, instruction: string, images: string[]): Promise<void> {
 		if (!this.valid(session)) {
-			this.cancel(session, '文件已变化，改写已取消');
+			this.cancel(session, '文件已变化，生成已取消');
 			return;
 		}
 		session.status = 'stream';
 		const range = session.view.state.field(lockedRange);
 		if (!range) {
-			this.cancel(session, '选区已失效，改写已取消');
+			this.cancel(session, '选区已失效，生成已取消');
 			return;
 		}
-		session.view.dispatch({ effects: setLock.of({ ...range, busy: true }) });
-		session.controller = new AbortController();
-		let first = true;
+		session.view.dispatch({ effects: setLock.of({ ...range, phase: 'stream' }) });
+		const controller = new AbortController();
+		this.controller = controller;
+		let preview = '';
 		try {
-			const result = await streamRewrite({ ...this.settings }, session.original, instruction, (delta) => {
+			const result = await streamRewrite({ ...this.settings }, session.original, instruction, images, (delta) => {
 				if (!this.valid(session)) throw new Error('文件已变化');
-				session.current = appendLocked(session.view, session.current, delta, first);
-				first = false;
-			}, session.controller.signal);
+				const current = session.view.state.field(lockedRange);
+				if (!current || session.view.state.doc.sliceString(current.from, current.to) !== session.original) {
+					throw new Error('原文已变化');
+				}
+				preview += delta;
+				session.view.dispatch({ effects: setLock.of({ ...current, phase: 'stream', preview }) });
+			}, controller.signal);
 			if (!this.valid(session)) throw new Error('文件已变化');
-			finishLocked(session.view, session.current, session.original, result);
-			this.session = null;
+			const current = session.view.state.field(lockedRange);
+			if (!current || session.view.state.doc.sliceString(current.from, current.to) !== session.original) {
+				throw new Error('原文已变化');
+			}
+			this.controller = null;
+			session.status = 'review';
+			session.view.dispatch({ effects: setLock.of({ ...current, phase: 'review', preview: result }) });
+			const modal = new DiffModal(this.app, session.original, result, () => {
+				if (!this.valid(session)) throw new Error('文件已变化，请重新生成');
+				applyLocked(session.view, session.original, result);
+				this.session = null;
+			}, () => {
+				if (this.review === modal) this.review = null;
+				if (this.session === session) this.cancel(session);
+			});
+			this.review = modal;
+			modal.open();
 		} catch (error) {
 			if (this.session !== session) return;
-			this.cancel(session, error instanceof Error ? error.message : '改写失败，原文已恢复');
+			this.cancel(session, error instanceof Error ? error.message : '生成失败，原文未改变');
 		}
 	}
 
 	private cancel(session: RewriteSession, message?: string): void {
 		if (this.session !== session) return;
 		this.session = null;
-		session.controller?.abort();
-		this.modal?.close();
-		if (this.views.get(session.editor) === session.view &&
-			session.view.state.field(editorInfoField, false)?.file === session.file) {
-			try {
-				if (session.current === session.original) session.view.dispatch({ effects: clearLock.of(undefined) });
-				else restoreLocked(session.view, session.current, session.original);
-			} catch {
-				new Notice('选区被外部修改，无法自动恢复，请检查笔记内容');
-				return;
-			}
-		} else {
-			// Effect: 即使文件已切换，也要解除该编辑器上的旧锁；不向新文件写入原文。
-			if (this.views.get(session.editor) === session.view) {
-				session.view.dispatch({ effects: clearLock.of(undefined) });
-			}
-			if (session.current !== session.original) {
-				new Notice('编辑器已离开原文件，无法自动恢复，请检查笔记内容');
-				return;
-			}
+		this.controller?.abort();
+		this.controller = null;
+		this.prompt?.close();
+		this.review?.close();
+		if ((this.views.has(session.view) || (session.editor as Editor & { cm?: EditorView }).cm === session.view) &&
+			session.view.state.field(lockedRange, false) !== undefined) {
+			session.view.dispatch({ effects: clearLock.of(undefined) });
 		}
 		if (message) new Notice(message);
 	}

@@ -2,7 +2,7 @@ import esbuild from 'esbuild';
 import { resolve } from 'node:path';
 
 await esbuild.build({
-  entryPoints: ['test/selection-lock.test.ts', 'test/ai.test.ts'],
+  entryPoints: ['test/selection-lock.test.ts', 'test/ai.test.ts', 'test/diff.test.ts', 'test/images.test.ts', 'test/editor-views.test.ts'],
   outdir: '../../.tmp',
   entryNames: 'obsidian-ai-rewrite-[name].test',
   outExtension: { '.js': '.mjs' },

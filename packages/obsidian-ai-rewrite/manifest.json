@@ -1,9 +1,9 @@
 {
   "id": "obsidian-ai-rewrite",
   "name": "AI Selection Rewrite",
-  "version": "0.2.0",
-  "minAppVersion": "1.0.0",
-  "description": "Stream AI rewrites into a protected selection from a command or context menu.",
+  "version": "0.3.0",
+  "minAppVersion": "1.1.0",
+  "description": "Preview AI writing with pasted images and review a diff before applying.",
   "author": "own-tools",
   "isDesktopOnly": false
 }

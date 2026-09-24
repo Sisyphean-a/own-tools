@@ -53,6 +53,6 @@ export class AiSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 			});
-		new Setting(containerEl).setName('隐私').setDesc('提交后仅将所选文本和本次指令发送到配置的服务；不会发送整篇笔记或文件名。');
+		new Setting(containerEl).setName('隐私').setDesc('提交后将选中文本、指令及主动粘贴的图片发送到配置的服务；不会发送整篇笔记或文件名。');
 	}
 }

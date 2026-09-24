@@ -3,79 +3,73 @@ import { test } from 'node:test';
 import { history, undo } from '@codemirror/commands';
 import { EditorState } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import { appendLocked, clearLock, finishLocked, lockedRange, restoreLocked, selectionGuard, setLock } from '../src/selection-lock';
+import { applyLocked, clearLock, lockedRange, selectionGuard, setLock } from '../src/selection-lock';
 
-function setup() {
-	let state = EditorState.create({ doc: 'abc SELECT xyz', extensions: [selectionGuard, history()] });
-	state = state.update({ effects: setLock.of({ from: 4, to: 10, busy: true }) }).state;
-	return state;
-}
-
-function holder() {
+function holder(selected = true) {
+	const from = 4;
+	const to = selected ? 10 : 4;
 	const view = {
-		state: setup(),
+		state: EditorState.create({ doc: 'abc SELECT xyz', extensions: [selectionGuard, history()] }),
 		dispatch: (spec: Parameters<EditorView['dispatch']>[0]) => {
 			view.state = view.state.update(spec).state;
 		},
 	};
+	view.dispatch({ effects: setLock.of({ from, to, phase: 'prompt', preview: '' }) });
 	return view;
 }
 
-test('locked text cannot be changed by user edits', () => {
-	const state = setup();
-	for (const changes of [
-		{ from: 6, insert: '!' },
-		{ from: 4, to: 10, insert: 'new' },
-		{ from: 3, to: 5, insert: '' },
-		{ from: 9, to: 11, insert: '' },
-	]) {
-		const result = state.update({ changes });
-		assert.equal(result.state.doc.toString(), state.doc.toString());
+test('selected source remains unchanged while chunks stream and user edits inside are blocked', () => {
+	const view = holder();
+	view.dispatch({ effects: setLock.of({ from: 4, to: 10, phase: 'stream', preview: '新' }) });
+	view.dispatch({ effects: setLock.of({ from: 4, to: 10, phase: 'stream', preview: '新内容' }) });
+	assert.equal(view.state.doc.toString(), 'abc SELECT xyz');
+	for (const changes of [{ from: 6, insert: '!' }, { from: 4, to: 10, insert: 'new' }]) {
+		assert.equal(view.state.update({ changes }).state.doc.toString(), 'abc SELECT xyz');
 	}
+	view.dispatch({ effects: setLock.of({ from: 4, to: 10, phase: 'review', preview: '新内容' }) });
+	assert.equal(view.state.field(lockedRange)?.phase, 'review');
+	assert.equal(view.state.doc.toString(), 'abc SELECT xyz');
+	view.dispatch({ effects: clearLock.of(undefined) });
+	assert.equal(view.state.field(lockedRange), null);
 });
 
-test('chunks appear incrementally, region remains locked, outside edits remap it', () => {
+test('confirmation applies exactly once and one undo restores source, preserving outside edits', () => {
 	const view = holder();
-	let current = appendLocked(view as unknown as EditorView, 'SELECT', '新', true);
-	assert.equal(view.state.doc.toString(), 'abc 新 xyz');
 	view.dispatch({ changes: { from: 0, insert: 'ok ' } });
-	assert.deepEqual(view.state.field(lockedRange), { from: 7, to: 8, busy: true });
-	current = appendLocked(view as unknown as EditorView, current, '内容', false);
-	assert.equal(current, '新内容');
-	assert.equal(view.state.doc.toString(), 'ok abc 新内容 xyz');
-	assert.equal(view.state.update({ changes: { from: 8, insert: '!' } }).state.doc.toString(), view.state.doc.toString());
-});
-
-test('completed stream is one undoable replacement even after a delay or outside edit', () => {
-	const view = holder();
-	let current = appendLocked(view as unknown as EditorView, 'SELECT', '新', true);
-	view.dispatch({ changes: { from: 0, insert: 'ok ' } });
-	current = appendLocked(view as unknown as EditorView, current, '内容', false);
-	finishLocked(view as unknown as EditorView, current, 'SELECT', '新内容');
+	assert.deepEqual(view.state.field(lockedRange), { from: 7, to: 13, phase: 'prompt', preview: '' });
+	view.dispatch({ effects: setLock.of({ from: 7, to: 13, phase: 'review', preview: '新内容' }) });
+	applyLocked(view as unknown as EditorView, 'SELECT', '新内容');
 	assert.equal(view.state.doc.toString(), 'ok abc 新内容 xyz');
 	assert.equal(view.state.field(lockedRange), null);
 	assert.equal(undo(view as unknown as EditorView), true);
 	assert.equal(view.state.doc.toString(), 'ok abc SELECT xyz');
 });
 
-test('failure restores original without adding an undo entry', () => {
+test('empty selection locks insertion point, then inserts only on confirmation', () => {
+	const view = holder(false);
+	assert.equal(view.state.update({ changes: { from: 4, insert: 'typing' } }).state.doc.toString(), 'abc SELECT xyz');
+	view.dispatch({ changes: { from: 0, insert: 'ok ' } });
+	assert.deepEqual(view.state.field(lockedRange), { from: 7, to: 7, phase: 'prompt', preview: '' });
+	view.dispatch({ effects: setLock.of({ from: 7, to: 7, phase: 'review', preview: '新内容' }) });
+	applyLocked(view as unknown as EditorView, '', '新内容');
+	assert.equal(view.state.doc.toString(), 'ok abc 新内容SELECT xyz');
+	assert.equal(undo(view as unknown as EditorView), true);
+	assert.equal(view.state.doc.toString(), 'ok abc SELECT xyz');
+});
+
+test('discard and failed requests never alter the source', () => {
 	const view = holder();
-	const current = appendLocked(view as unknown as EditorView, 'SELECT', '半截', true);
-	restoreLocked(view as unknown as EditorView, current, 'SELECT');
+	view.dispatch({ effects: setLock.of({ from: 4, to: 10, phase: 'stream', preview: '部分' }) });
+	view.dispatch({ effects: clearLock.of(undefined) });
 	assert.equal(view.state.doc.toString(), 'abc SELECT xyz');
 	assert.equal(view.state.field(lockedRange), null);
 	assert.equal(undo(view as unknown as EditorView), false);
 });
 
-test('external edits invalidate the write rather than overwriting them', () => {
+test('external bypass that changes original is rejected instead of overwritten', () => {
 	const view = holder();
-	const current = appendLocked(view as unknown as EditorView, 'SELECT', '半截', true);
+	view.dispatch({ effects: setLock.of({ from: 4, to: 10, phase: 'review', preview: '完整' }) });
 	view.dispatch({ changes: { from: 5, insert: '外' }, filter: false });
-	assert.throws(() => finishLocked(view as unknown as EditorView, current, 'SELECT', '完整'), /选区已变化/);
-});
-
-test('closing the prompt unlocks without modifying text', () => {
-	const cancelled = setup().update({ effects: clearLock.of(undefined) }).state;
-	assert.equal(cancelled.field(lockedRange), null);
-	assert.equal(cancelled.doc.toString(), 'abc SELECT xyz');
+	assert.throws(() => applyLocked(view as unknown as EditorView, 'SELECT', '完整'), /原文或插入位置已变化/);
+	assert.equal(view.state.doc.toString(), 'abc S外ELECT xyz');
 });

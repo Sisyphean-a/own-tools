@@ -1,24 +1,34 @@
 import { isolateHistory } from '@codemirror/commands';
-import { Annotation, EditorState, Prec, StateEffect, StateField, Transaction, type Extension } from '@codemirror/state';
+import { Annotation, EditorState, Prec, StateEffect, StateField, type Extension } from '@codemirror/state';
 import { Decoration, EditorView, WidgetType } from '@codemirror/view';
 
 export interface LockedRange {
 	from: number;
 	to: number;
-	busy: boolean;
+	phase: 'prompt' | 'stream' | 'review';
+	preview: string;
 }
 
 export const setLock = StateEffect.define<LockedRange>();
 export const clearLock = StateEffect.define<void>();
-const ownReplacement = Annotation.define<boolean>();
+const ownApply = Annotation.define<boolean>();
 
-class BusyWidget extends WidgetType {
-	toDOM(): HTMLElement {
-		const el = document.createElement('span');
-		el.className = 'ai-rewrite-progress';
-		el.setAttribute('role', 'status');
-		el.textContent = 'AI 正在改写…';
-		return el;
+class PreviewWidget extends WidgetType {
+	constructor(private phase: LockedRange['phase'], private preview: string) { super(); }
+
+	eq(other: PreviewWidget): boolean {
+		return this.phase === other.phase && this.preview === other.preview;
+	}
+
+	toDOM(view: EditorView): HTMLElement {
+		const root = view.dom.ownerDocument.createElement('span');
+		root.className = 'ai-rewrite-preview';
+		const status = root.createSpan({ cls: 'ai-rewrite-preview-status' });
+		if (this.phase === 'stream') status.createSpan({ cls: 'ai-rewrite-spinner', attr: { 'aria-hidden': 'true' } });
+		status.createSpan({ text: this.phase === 'stream' ? 'AI 正在生成…' : '已完成 · 待确认' });
+		const body = root.createSpan({ cls: 'ai-rewrite-preview-text' });
+		body.setText(this.preview || '正在等待模型响应…');
+		return root;
 	}
 }
 
@@ -39,9 +49,11 @@ export const lockedRange = StateField.define<LockedRange | null>({
 	provide: (field) => EditorView.decorations.compute([field], (state) => {
 		const range = state.field(field);
 		if (!range) return Decoration.none;
-		const mark = Decoration.mark({ class: range.busy ? 'ai-rewrite-locked ai-rewrite-busy' : 'ai-rewrite-locked' });
-		const parts = [mark.range(range.from, range.to)];
-		if (range.busy) parts.push(Decoration.widget({ widget: new BusyWidget(), side: 1 }).range(range.to));
+		const parts = [];
+		if (range.from < range.to) parts.push(Decoration.mark({ class: 'ai-rewrite-locked' }).range(range.from, range.to));
+		if (range.phase !== 'prompt') {
+			parts.push(Decoration.widget({ widget: new PreviewWidget(range.phase, range.preview), side: 1 }).range(range.to));
+		}
 		return Decoration.set(parts, true);
 	}),
 });
@@ -50,61 +62,28 @@ export const selectionGuard: Extension = [
 	lockedRange,
 	Prec.highest(EditorState.transactionFilter.of((tr) => {
 		const range = tr.startState.field(lockedRange);
-		if (!range || tr.annotation(ownReplacement)) return tr;
+		if (!range || tr.annotation(ownApply)) return tr;
 		let blocked = false;
-		// Rule: 插入在两端允许；删除或替换只要与锁定内容相交，就拒绝整笔事务。
+		// Rule: 零长度选区锁住插入点；有选区时只阻止与选区内容相交的修改。
 		tr.changes.iterChanges((from, to) => {
-			if ((from === to && from > range.from && from < range.to) ||
+			if (range.from === range.to) {
+				if (from <= range.from && to >= range.to) blocked = true;
+			} else if ((from === to && from > range.from && from < range.to) ||
 				(from < to && from < range.to && to > range.from)) blocked = true;
 		});
 		return blocked ? [] : tr;
 	})),
 ];
 
-function requireLocked(view: EditorView, expected: string): LockedRange {
+export function applyLocked(view: EditorView, original: string, replacement: string): void {
 	const range = view.state.field(lockedRange);
-	if (!range || view.state.doc.sliceString(range.from, range.to) !== expected) {
-		throw new Error('选区已变化，无法安全改写');
+	if (!range || range.phase !== 'review' || view.state.doc.sliceString(range.from, range.to) !== original) {
+		throw new Error('原文或插入位置已变化，请重新生成');
 	}
-	return range;
-}
-
-export function appendLocked(view: EditorView, previous: string, delta: string, first: boolean): string {
-	const range = requireLocked(view, previous);
-	const text = first ? delta : previous + delta;
 	view.dispatch({
-		changes: { from: first ? range.from : range.to, to: range.to, insert: delta },
-		effects: setLock.of({ from: range.from, to: range.from + text.length, busy: true }),
-		annotations: [ownReplacement.of(true), Transaction.addToHistory.of(false)],
-	});
-	return text;
-}
-
-export function restoreLocked(view: EditorView, current: string, original: string): void {
-	const range = requireLocked(view, current);
-	view.dispatch({
-		changes: { from: range.from, to: range.to, insert: original },
+		changes: { from: range.from, to: range.to, insert: replacement },
+		selection: { anchor: range.from + replacement.length },
 		effects: clearLock.of(undefined),
-		annotations: [ownReplacement.of(true), Transaction.addToHistory.of(false)],
+		annotations: [ownApply.of(true), isolateHistory.of('full')],
 	});
 }
-
-export function finishLocked(view: EditorView, current: string, original: string, result: string): void {
-	const range = requireLocked(view, current);
-	if (current !== original) {
-		// Rule: 流式事务不入撤销历史；先还原原文，再以一笔独立事务提交最终改写。
-		view.dispatch({
-			changes: { from: range.from, to: range.to, insert: original },
-			effects: setLock.of({ from: range.from, to: range.from + original.length, busy: true }),
-			annotations: [ownReplacement.of(true), Transaction.addToHistory.of(false)],
-		});
-	}
-	const finalRange = requireLocked(view, original);
-	view.dispatch({
-		changes: { from: finalRange.from, to: finalRange.to, insert: result },
-		selection: { anchor: finalRange.from + result.length },
-		effects: clearLock.of(undefined),
-		annotations: [ownReplacement.of(true), isolateHistory.of('full')],
-	});
-}
-
