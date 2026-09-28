@@ -1,9 +1,9 @@
 {
   "id": "obsidian-ai-rewrite",
   "name": "AI Selection Rewrite",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "minAppVersion": "1.1.0",
-  "description": "Preview AI writing with pasted images and review a diff before applying.",
+  "description": "Preview AI writing with automatic note context, pasted images, and a reviewable diff.",
   "author": "own-tools",
   "isDesktopOnly": false
 }

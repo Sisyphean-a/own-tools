@@ -3,3 +3,4 @@ node_modules/
 packages/*/main.js
 packages/*/main.js.map
 packages/*/node_modules/
+.codegraph

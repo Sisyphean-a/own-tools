@@ -1,6 +1,6 @@
 {
   "name": "obsidian-ai-rewrite",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": true,
   "description": "Rewrite a selected passage in Obsidian with AI",
   "main": "main.js",

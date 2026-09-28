@@ -1,11 +1,12 @@
 import { EditorView } from '@codemirror/view';
 import { Editor, MarkdownFileInfo, MarkdownView, Notice, Plugin, TFile, editorInfoField } from 'obsidian';
 import { streamRewrite, validateSettings } from './ai';
+import { buildContext } from './context';
 import { DiffModal } from './diff-modal';
 import { createSelectionExtension, findEditorView } from './editor-views';
 import { PromptModal } from './prompt-modal';
 import { applyLocked, clearLock, lockedRange, setLock } from './selection-lock';
-import { AiSettingTab, DEFAULT_SETTINGS, type AiSettings } from './settings';
+import { AiSettingTab, DEFAULT_SETTINGS, normalizeContextLimit, type AiSettings } from './settings';
 
 interface RewriteSession {
 	editor: Editor;
@@ -26,6 +27,7 @@ export default class AiRewritePlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		this.settings = { ...DEFAULT_SETTINGS, ...await this.loadData() as Partial<AiSettings> };
+		this.settings.contextLimit = normalizeContextLimit(this.settings.contextLimit);
 		this.registerEditorExtension(createSelectionExtension(this.views));
 		this.addSettingTab(new AiSettingTab(this.app, this));
 		this.addCommand({
@@ -129,9 +131,11 @@ export default class AiRewritePlugin extends Plugin {
 		session.view.dispatch({ effects: setLock.of({ ...range, phase: 'stream' }) });
 		const controller = new AbortController();
 		this.controller = controller;
+		// Rule: 上下文在提交时从当前文档取，只用于理解语境，不扩大锁定与写回范围。
+		const context = buildContext(session.view.state.doc.toString(), range.from, range.to, this.settings.contextLimit);
 		let preview = '';
 		try {
-			const result = await streamRewrite({ ...this.settings }, session.original, instruction, images, (delta) => {
+			const result = await streamRewrite({ ...this.settings }, session.original, context, instruction, images, (delta) => {
 				if (!this.valid(session)) throw new Error('文件已变化');
 				const current = session.view.state.field(lockedRange);
 				if (!current || session.view.state.doc.sliceString(current.from, current.to) !== session.original) {
