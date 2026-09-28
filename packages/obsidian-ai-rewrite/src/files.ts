@@ -78,13 +78,13 @@ export function parseReadArgs(argumentsJson: string): ReadFileArgs {
 /**
  * Flow: 解析路径并按 scope 校验，读取文本文件的指定行区间。
  * Failure: 越界、不存在、目录、无权限、过大、二进制或编码无法识别都直接抛错，由调用方取消并提示。
- * Effect: 仅桌面版可用；node 模块用动态 import，手机版不会加载文件系统代码。
+ * Effect: 仅桌面版可用；Node 模块用按需 require，手机版不会加载文件系统代码。
  */
 export async function readLocalFile(args: ReadFileArgs, options: ReadFileOptions): Promise<FileReadResult> {
 	// Rule: obsidianmd/no-nodejs-modules 要求以 Platform.isDesktop 判断开头；平板桌面模式没有 Node 运行时，再用 isDesktopApp 确认。
 	if (!Platform.isDesktop) throw new Error('文件读取仅在桌面版可用');
 	if (!Platform.isDesktopApp) throw new Error('文件读取需要桌面版 Obsidian 的本地文件系统');
-	const [fs, path, os] = await Promise.all([import('node:fs/promises'), import('node:path'), import('node:os')]);
+	const { fs, path, os } = nodeModules();
 	const target = resolveTarget(args, options, path, os);
 	if (options.signal.aborted) throw new Error('改写已取消');
 	let info;
@@ -136,6 +136,23 @@ export function formatFileResult(result: FileReadResult): string {
 export function fileName(input: string): string {
 	const parts = input.split(/[\\/]/);
 	return parts[parts.length - 1] || input;
+}
+
+/**
+ * Rule: 渲染进程的动态 import 解析不了 node: 内建模块，只能用窗口暴露的 require（window.require）按需加载；
+ * 模块级不 import，保证手机版不会加载文件系统代码。
+ * Failure: 拿不到 require 说明不是桌面版运行时。
+ */
+function nodeModules() {
+	const load = typeof window === 'undefined'
+		? undefined
+		: (window as unknown as { require?: (id: string) => unknown }).require;
+	if (typeof load !== 'function') throw new Error('文件读取仅在桌面版可用');
+	return {
+		fs: load('fs/promises') as typeof import('fs/promises'),
+		path: load('path') as typeof import('path'),
+		os: load('os') as typeof import('os'),
+	};
 }
 
 function resolveTarget(args: ReadFileArgs, options: ReadFileOptions, path: typeof import('node:path'), os: typeof import('node:os')): string {

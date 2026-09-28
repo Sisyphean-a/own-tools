@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { formatCurrentTime, streamRewrite, validateSettings, type StreamSink } from '../src/ai';
 import { DEFAULT_SETTINGS } from '../src/settings';
 import { setRequestUrlHandler, type RequestUrlHandler, type RequestUrlResponse } from './obsidian-stub';
+
+// Effect: 测试产物是 ESM，没有 window.require；用 createRequire 模拟渲染进程的 window。
+Object.assign(globalThis, { window: { require: createRequire(import.meta.url) } });
 
 const settings = { ...DEFAULT_SETTINGS, apiKey: 'secret' };
 const searchSettings = { ...settings, searchEnabled: true, searchApiKey: 'tvly-key' };

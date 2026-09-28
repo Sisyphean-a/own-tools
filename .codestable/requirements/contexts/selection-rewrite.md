@@ -34,6 +34,7 @@ code-paths:
 - 联网搜索默认关闭；开启并配置密钥后，模型自行决定是否调用 `web_search`（query/topic/timeRange），一次请求最多 10 轮；额度用尽后不再提供工具并要求模型基于已有资料收敛作答，不把额度问题当作错误抛给用户；工具轮的中间说明文字不进入待确认结果。依据：`src/ai.ts` 的 `streamRewrite`、`src/search.ts` 的 `WEB_SEARCH_TOOL`、`src/main.ts` 的 `submit`。
 - 思考内容与工具进度只显示在预览卡片的过程区（可折叠，高度不超过窗口的一半）；无新内容超过 8 秒时显示等待提示，便于区分卡住和仍在响应；不写入笔记。依据：`src/selection-lock.ts` 的 `PreviewWidget`、`appendThinking`、`setProgress`、`quietHint`、`styles.css` 的 `.ai-rewrite-process-body`。
 - 文件读取默认关闭且仅桌面版（Electron）可用；范围可为仅笔记库或任意本地路径，前者拒绝库外路径；只有只读能力，单次受行数与字符上限约束，截断时说明续读位置；不存在、目录、无权限、二进制、编码无法识别都明确失败，不静默跳过；读取到的文件内容会随请求发送给 AI 服务。依据：`src/files.ts` 的 `FILE_READ_TOOL`、`readLocalFile`、`src/ai.ts` 的 `runTool`、`src/settings.ts` 的 `fileReadScope`。
+- 生成失败且选区仍有效时自动回到输入框并保留已输入的指令与图片，不要求用户重新输入；选区失效或文件变化时才直接取消并保留原文。依据：`src/main.ts` 的 `submit`、`showPrompt`、`src/prompt-modal.ts` 的 `PromptDraft`。
 - 携带工具的请求会在载荷里附带当前时间（含星期与时区），时效判断以它为准，模型不得沿用训练数据里的日期。依据：`src/ai.ts` 的 `formatCurrentTime`、`TIME_PROMPT`。
 - 搜索失败（网络错误、非 2xx、无效数据）时不生成回答，明确提示并保留原文；查询词会发送给配置的搜索服务，检索结果随请求交给模型。依据：`src/search.ts` 的 `searchWeb`、`src/settings.ts` 的 `searchEnabled`、`searchEndpoint`、`searchApiKey`。
 - 链接不可达、返回非 2xx、不是网页文本或没有可读正文时明确失败并保留原文，不静默跳过后让模型编造网页内容。依据：`src/web.ts` 的 `readWebPages`、`src/main.ts` 的 `submit`。

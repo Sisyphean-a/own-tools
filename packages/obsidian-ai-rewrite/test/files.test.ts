@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_READ_LINES, MAX_READ_LINES, formatFileResult, parseReadArgs, readLocalFile } from '../src/files';
+
+// Effect: 测试产物是 ESM，没有 window.require；用 createRequire 模拟渲染进程的 window。
+Object.assign(globalThis, { window: { require: createRequire(import.meta.url) } });
 
 const signal = new AbortController().signal;
 

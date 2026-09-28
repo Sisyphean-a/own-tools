@@ -1,6 +1,12 @@
 import { App, Modal, Notice, Setting } from 'obsidian';
 import { MAX_REQUEST_BYTES, readPastedImage } from './images';
 
+/** 生成失败后重新打开输入框时恢复的内容。 */
+export interface PromptDraft {
+	instruction: string;
+	images: string[];
+}
+
 export class PromptModal extends Modal {
 	private input!: HTMLTextAreaElement;
 	private imageList!: HTMLElement;
@@ -12,6 +18,7 @@ export class PromptModal extends Modal {
 	constructor(
 		app: App,
 		private hasSelection: boolean,
+		private initial: PromptDraft | null,
 		private submitPrompt: (instruction: string, images: string[]) => void,
 		private release: (submitted: boolean) => void,
 	) {
@@ -33,6 +40,10 @@ export class PromptModal extends Modal {
 		});
 		this.input.addEventListener('paste', (event) => { void this.pasteImages(event); });
 		this.imageList = this.contentEl.createDiv({ cls: 'ai-rewrite-images' });
+		// Effect: 重开时恢复上次的指令和图片，失败后不用重新输入。
+		this.input.value = this.initial?.instruction ?? '';
+		this.images = [...(this.initial?.images ?? [])];
+		this.renderImages();
 		new Setting(this.contentEl).addButton((button) => {
 			button.setButtonText(this.hasSelection ? '生成改写' : '生成内容').setCta().onClick(() => this.submit());
 		});

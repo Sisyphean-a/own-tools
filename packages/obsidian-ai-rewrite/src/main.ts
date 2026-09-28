@@ -4,7 +4,7 @@ import { streamRewrite, validateSettings, type RewriteRuntime } from './ai';
 import { buildContext } from './context';
 import { DiffModal } from './diff-modal';
 import { createSelectionExtension, findEditorView } from './editor-views';
-import { PromptModal } from './prompt-modal';
+import { PromptModal, type PromptDraft } from './prompt-modal';
 import { appendThinking, applyLocked, clearLock, lockedRange, setLock, setProgress } from './selection-lock';
 import { AiSettingTab, DEFAULT_SETTINGS, normalizeContextLimit, normalizeFileReadScope, type AiSettings } from './settings';
 import { extractUrls, readWebPages } from './web';
@@ -109,7 +109,12 @@ export default class AiRewritePlugin extends Plugin {
 		const session: RewriteSession = { editor, view, file, info, original, status: 'prompt' };
 		view.dispatch({ effects: setLock.of({ from, to, phase: 'prompt', preview: '' }) });
 		this.session = session;
-		const modal = new PromptModal(this.app, !!original, (instruction, images) => {
+		this.showPrompt(session, null);
+	}
+
+	/** Flow: 打开输入框；draft 非空时恢复上次的指令与图片（生成失败后重试）。 */
+	private showPrompt(session: RewriteSession, draft: PromptDraft | null): void {
+		const modal = new PromptModal(this.app, !!session.original, draft, (instruction, images) => {
 			void this.submit(session, instruction, images);
 		}, (submitted) => {
 			if (this.prompt === modal) this.prompt = null;
@@ -188,7 +193,19 @@ export default class AiRewritePlugin extends Plugin {
 			modal.open();
 		} catch (error) {
 			if (this.session !== session) return;
-			this.cancel(session, error instanceof Error ? error.message : '生成失败，原文未改变');
+			const message = error instanceof Error ? error.message : '生成失败，原文未改变';
+			const current = this.valid(session) ? session.view.state.field(lockedRange, false) : undefined;
+			if (current) {
+				// Effect: 生成失败且选区仍有效时回到输入框，保留已输入的指令与图片。
+				this.controller?.abort();
+				this.controller = null;
+				session.status = 'prompt';
+				session.view.dispatch({ effects: setLock.of({ from: current.from, to: current.to, phase: 'prompt', preview: '' }) });
+				new Notice(message);
+				this.showPrompt(session, { instruction, images });
+				return;
+			}
+			this.cancel(session, message);
 		}
 	}
 
