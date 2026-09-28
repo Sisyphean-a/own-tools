@@ -35,6 +35,8 @@ const ownApply = Annotation.define<boolean>();
 
 /** 无新内容超过该秒数时显示等待提示，避免看起来像卡死。 */
 export const QUIET_HINT_SECONDS = 8;
+/** 过程区保留的思考字符上限；超出时只保留最近的，避免长时间生成把状态和 DOM 撑大。 */
+export const MAX_THINKING_CHARS = 12000;
 
 /** Flow: 流式阶段长时间没有新内容时给出等待文案；其他阶段不提示。 */
 export function quietHint(phase: LockedRange['phase'], lastEventAt: number, now: number): string | null {
@@ -50,17 +52,25 @@ interface PreviewParts {
 	startedAt: number;
 	lastEventAt: number;
 	signature: string;
+	lastThinking: string;
+	lastProgress: readonly ProgressEntry[] | null;
 	spinner: HTMLElement;
 	statusLabel: HTMLElement;
+	statusLabelValue: Text;
 	elapsed: HTMLElement;
+	elapsedValue: Text;
 	quiet: HTMLElement;
+	quietValue: Text;
 	process: HTMLElement;
 	toggle: HTMLButtonElement;
 	processLabel: HTMLElement;
+	processLabelValue: Text;
 	body: HTMLElement;
 	thinking: HTMLElement;
+	thinkingValue: Text;
 	tools: HTMLElement;
 	text: HTMLElement;
+	textValue: Text;
 }
 
 const previewParts = new WeakMap<HTMLElement, PreviewParts>();
@@ -75,26 +85,34 @@ class PreviewWidget extends WidgetType {
 	}
 
 	toDOM(view: EditorView): HTMLElement {
-		const root = view.dom.ownerDocument.createElement('span');
+		const doc = view.dom.ownerDocument;
+		const root = doc.createElement('span');
 		root.className = 'ai-rewrite-preview';
 		const status = root.createSpan({ cls: 'ai-rewrite-preview-status' });
 		const spinner = status.createSpan({ cls: 'ai-rewrite-spinner', attr: { 'aria-hidden': 'true' } });
 		const statusLabel = status.createSpan({ cls: 'ai-rewrite-preview-status-label' });
+		const statusLabelValue = statusLabel.appendChild(doc.createTextNode(''));
 		const elapsed = status.createSpan({ cls: 'ai-rewrite-preview-elapsed' });
+		const elapsedValue = elapsed.appendChild(doc.createTextNode(''));
 		const quiet = root.createDiv({ cls: 'ai-rewrite-quiet' });
+		const quietValue = quiet.appendChild(doc.createTextNode(''));
 		const process = root.createDiv({ cls: 'ai-rewrite-process' });
 		const toggle = process.createEl('button', { cls: 'ai-rewrite-process-toggle', attr: { type: 'button' } });
 		const processLabel = toggle.createSpan({ cls: 'ai-rewrite-process-label' });
+		const processLabelValue = processLabel.appendChild(doc.createTextNode(''));
 		toggle.createSpan({ cls: 'ai-rewrite-process-arrow', text: '▸', attr: { 'aria-hidden': 'true' } });
 		const inner = process.createDiv({ cls: 'ai-rewrite-process-panel' }).createDiv({ cls: 'ai-rewrite-process-inner' });
 		const body = inner.createDiv({ cls: 'ai-rewrite-process-body' });
 		const thinking = body.createDiv({ cls: 'ai-rewrite-thinking' });
+		const thinkingValue = thinking.appendChild(doc.createTextNode(''));
 		const tools = body.createEl('ul', { cls: 'ai-rewrite-tools' });
 		const text = root.createSpan({ cls: 'ai-rewrite-preview-text' });
-		const win = view.dom.ownerDocument.defaultView;
+		const textValue = text.appendChild(doc.createTextNode(''));
+		const win = doc.defaultView;
 		const parts: PreviewParts = {
-			range: this.range, win, timer: null, startedAt: Date.now(), lastEventAt: Date.now(), signature: '',
-			spinner, statusLabel, elapsed, quiet, process, toggle, processLabel, body, thinking, tools, text,
+			range: this.range, win, timer: null, startedAt: Date.now(), lastEventAt: Date.now(), signature: '', lastThinking: '', lastProgress: null,
+			spinner, statusLabel, statusLabelValue, elapsed, elapsedValue, quiet, quietValue,
+			process, toggle, processLabel, processLabelValue, body, thinking, thinkingValue, tools, text, textValue,
 		};
 		previewParts.set(root, parts);
 		toggle.addEventListener('click', () => {
@@ -105,7 +123,7 @@ class PreviewWidget extends WidgetType {
 			parts.timer = win.setInterval(() => {
 				const current = previewParts.get(root);
 				if (!current || current.timer === null) return;
-				current.elapsed.setText(`${elapsedSeconds(current)}s`);
+				setTextData(current.elapsedValue, `${elapsedSeconds(current)}s`);
 				this.renderQuiet(current);
 			}, 1000);
 		}
@@ -136,32 +154,44 @@ class PreviewWidget extends WidgetType {
 		const streaming = this.range.phase === 'stream';
 		const thinking = this.range.thinking ?? '';
 		const progress = this.range.progress ?? [];
-		// Rule: 只有思考、正文或工具进度真的变化才重置“静默”计时，避免折叠操作被当成新内容。
-		const signature = `${thinking.length}|${this.range.preview.length}|${progress.map((entry) => entry.text).join('\u0001')}`;
+		// Rule: 只有思考、正文或工具进度真的变化才重置“静默”计时，避免折叠操作被当成新内容；思考被截断后靠尾部内容判断。
+		const signature = `${thinking.length}|${thinking.slice(-64)}|${this.range.preview.length}|${progress.map((entry) => entry.text).join('\u0001')}`;
 		if (signature !== parts.signature) {
 			parts.signature = signature;
 			parts.lastEventAt = Date.now();
 		}
 		const hasProcess = thinking.length > 0 || progress.length > 0;
 		const expanded = hasProcess && (this.range.expanded ?? true);
+		// Rule: 内部内容始终是纯文本，不做任何高亮或 Markdown 解析。
 		parts.spinner.hidden = !streaming;
-		parts.statusLabel.setText(streaming ? 'AI 正在生成…' : '已完成 · 待确认');
-		parts.elapsed.setText(streaming ? `${elapsedSeconds(parts)}s` : '');
+		setTextData(parts.statusLabelValue, streaming ? 'AI 正在生成…' : '已完成 · 待确认');
+		setTextData(parts.elapsedValue, streaming ? `${elapsedSeconds(parts)}s` : '');
 		parts.process.hidden = !hasProcess;
 		parts.process.classList.toggle('is-expanded', expanded);
 		parts.toggle.setAttribute('aria-expanded', String(expanded));
-		parts.processLabel.setText(!streaming ? '思考与工具' : this.range.activity ?? (this.range.preview ? '正在生成正文…' : thinking ? '正在思考…' : '准备中…'));
-		const stuck = expanded && parts.body.scrollTop + parts.body.clientHeight >= parts.body.scrollHeight - 8;
-		parts.thinking.setText(thinking);
-		parts.thinking.hidden = thinking.length === 0;
-		parts.tools.hidden = progress.length === 0;
-		parts.tools.empty();
-		for (const entry of progress) {
-			// Rule: 每个工具调用只占一行，完成时原地更新，不追加第二条。
-			parts.tools.createEl('li', { cls: entry.done ? 'is-done' : 'is-running', text: entry.text });
+		setTextData(parts.processLabelValue, !streaming ? '思考与工具' : this.range.activity ?? (this.range.preview ? '正在生成正文…' : thinking ? '正在思考…' : '准备中…'));
+		// Rule: 文字和列表未变化就不重写 DOM；滚动调整放到下一帧，避免每次渲染都强制重排大面板。
+		if (parts.lastThinking !== thinking) {
+			parts.lastThinking = thinking;
+			setTextData(parts.thinkingValue, thinking);
+			parts.thinking.hidden = thinking.length === 0;
 		}
-		parts.text.setText(this.range.preview || (hasProcess ? '' : '正在等待模型响应…'));
-		if (stuck) parts.body.scrollTop = parts.body.scrollHeight;
+		if (parts.lastProgress !== progress) {
+			parts.lastProgress = progress;
+			parts.tools.hidden = progress.length === 0;
+			parts.tools.empty();
+			for (const entry of progress) {
+				// Rule: 每个工具调用只占一行，完成时原地更新，不追加第二条。
+				parts.tools.createEl('li', { cls: entry.done ? 'is-done' : 'is-running', text: entry.text });
+			}
+		}
+		setTextData(parts.textValue, this.range.preview || (hasProcess ? '' : '正在等待模型响应…'));
+		if (expanded && parts.win) {
+			const body = parts.body;
+			parts.win.requestAnimationFrame(() => {
+				if (body.scrollTop + body.clientHeight >= body.scrollHeight - 8) body.scrollTop = body.scrollHeight;
+			});
+		}
 		this.renderQuiet(parts);
 	}
 
@@ -169,8 +199,18 @@ class PreviewWidget extends WidgetType {
 	private renderQuiet(parts: PreviewParts): void {
 		const message = quietHint(parts.range.phase, parts.lastEventAt, Date.now());
 		parts.quiet.hidden = message === null;
-		if (message) parts.quiet.setText(message);
+		setTextData(parts.quietValue, message ?? '');
 	}
+}
+
+/** Rule: 只改文本节点的 data，不重建节点；过程内容始终是纯文本，不做任何高亮或语法着色。 */
+function setTextData(node: Text, value: string): void {
+	if (node.data !== value) node.data = value;
+}
+
+/** Rule: 过程区只保留最近的思考内容，避免长时间生成时状态和 DOM 无限膨胀。 */
+function clipThinking(text: string): string {
+	return text.length <= MAX_THINKING_CHARS ? text : `…${text.slice(-MAX_THINKING_CHARS)}`;
 }
 
 function elapsedSeconds(parts: PreviewParts): number {
@@ -193,7 +233,9 @@ export const lockedRange = StateField.define<LockedRange | null>({
 				next = effect.value.phase === 'review' ? { ...effect.value, expanded: false } : effect.value;
 			}
 			if (effect.is(clearLock)) next = null;
-			if (effect.is(appendThinking) && next) next = { ...next, thinking: `${next.thinking ?? ''}${effect.value}`, activity: undefined };
+			if (effect.is(appendThinking) && next) {
+				next = { ...next, thinking: clipThinking(`${next.thinking ?? ''}${effect.value}`), activity: undefined };
+			}
 			if (effect.is(setProgress) && next) {
 				const entries = next.progress ?? [];
 				const index = entries.findIndex((entry) => entry.id === effect.value.id);

@@ -9,6 +9,9 @@ import { appendThinking, applyLocked, clearLock, lockedRange, setLock, setProgre
 import { AiSettingTab, DEFAULT_SETTINGS, normalizeContextLimit, normalizeFileReadScope, type AiSettings } from './settings';
 import { extractUrls, readWebPages } from './web';
 
+/** Rule: 流式更新按帧调度，但至少间隔该毫秒数才真正合并一次，避免每帧都触发编辑器重排。 */
+const FLUSH_INTERVAL_MS = 80;
+
 interface RewriteSession {
 	editor: Editor;
 	view: EditorView;
@@ -141,8 +144,41 @@ export default class AiRewritePlugin extends Plugin {
 		// Rule: 上下文在提交时从当前文档取，只用于理解语境，不扩大锁定与写回范围。
 		const context = buildContext(session.view.state.doc.toString(), range.from, range.to, this.settings.contextLimit);
 		let preview = '';
+		let thinkingBuffer = '';
+		let flushFrame: number | null = null;
+		let lastFlushAt = 0;
+		// Effect: 用 requestAnimationFrame 按帧调度（后台标签页不空转），并保证最小间隔；思考与正文合并成一次事务。
+		const flush = (): void => {
+			if (!this.valid(session)) return;
+			const current = session.view.state.field(lockedRange, false);
+			if (!current || session.view.state.doc.sliceString(current.from, current.to) !== session.original) return;
+			const thinking = thinkingBuffer;
+			thinkingBuffer = '';
+			session.view.dispatch({
+				effects: [
+					setLock.of({ ...current, phase: 'stream', preview }),
+					...(thinking ? [appendThinking.of(thinking)] : []),
+				],
+			});
+		};
+		const scheduleFlush = (): void => {
+			if (flushFrame !== null) return;
+			flushFrame = window.requestAnimationFrame(() => {
+				flushFrame = null;
+				const now = Date.now();
+				if (now - lastFlushAt < FLUSH_INTERVAL_MS) {
+					scheduleFlush();
+					return;
+				}
+				lastFlushAt = now;
+				flush();
+			});
+		};
 		const pushThinking = (text: string) => {
-			if (this.valid(session)) session.view.dispatch({ effects: appendThinking.of(text) });
+			if (!this.valid(session)) throw new Error('文件已变化');
+			if (!session.view.state.field(lockedRange, false)) throw new Error('原文已变化');
+			thinkingBuffer += text;
+			scheduleFlush();
 		};
 		const pushProgress = (id: string, text: string, done: boolean) => {
 			if (this.valid(session)) session.view.dispatch({ effects: setProgress.of({ id, text, done }) });
@@ -156,12 +192,9 @@ export default class AiRewritePlugin extends Plugin {
 			const result = await streamRewrite({ ...this.settings }, session.original, context, instruction, images, pages, {
 				delta: (delta) => {
 					if (!this.valid(session)) throw new Error('文件已变化');
-					const current = session.view.state.field(lockedRange);
-					if (!current || session.view.state.doc.sliceString(current.from, current.to) !== session.original) {
-						throw new Error('原文已变化');
-					}
+					if (!session.view.state.field(lockedRange, false)) throw new Error('原文已变化');
 					preview += delta;
-					session.view.dispatch({ effects: setLock.of({ ...current, phase: 'stream', preview }) });
+					scheduleFlush();
 				},
 				// Effect: 工具轮的说明文字不是最终结果，丢弃后只保留最终回答。
 				reset: () => {
@@ -206,6 +239,8 @@ export default class AiRewritePlugin extends Plugin {
 				return;
 			}
 			this.cancel(session, message);
+		} finally {
+			if (flushFrame !== null) window.cancelAnimationFrame(flushFrame);
 		}
 	}
 

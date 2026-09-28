@@ -8,8 +8,8 @@ import { formatCurrentTime, streamRewrite, validateSettings, type StreamSink } f
 import { DEFAULT_SETTINGS } from '../src/settings';
 import { setRequestUrlHandler, type RequestUrlHandler, type RequestUrlResponse } from './obsidian-stub';
 
-// Effect: 测试产物是 ESM，没有 window.require；用 createRequire 模拟渲染进程的 window。
-Object.assign(globalThis, { window: { require: createRequire(import.meta.url) } });
+// Effect: 测试产物是 ESM，没有 window.require/window 计时器；模拟渲染进程的 window。
+Object.assign(globalThis, { window: { require: createRequire(import.meta.url), setInterval, clearInterval, setTimeout, clearTimeout } });
 
 const settings = { ...DEFAULT_SETTINGS, apiKey: 'secret' };
 const searchSettings = { ...settings, searchEnabled: true, searchApiKey: 'tvly-key' };
@@ -332,6 +332,20 @@ test('search settings are validated before any request', async () => {
 	assert.match(validateSettings({ ...searchSettings, searchEndpoint: 'http://example.test/search' }) ?? '', /HTTPS/);
 	assert.equal(validateSettings({ ...searchSettings, searchEndpoint: 'http://127.0.0.1:8080/search' }), null);
 	assert.match(validateSettings({ ...settings, fileReadScope: 'bad' as 'off' }) ?? '', /文件读取范围/);
+});
+
+test('a stalled stream is interrupted instead of hanging forever', async () => {
+	const sse = chunkEvent({ content: '部分' });
+	await withFetch(async () => new Response(new ReadableStream({
+		start(controller) {
+			controller.enqueue(new TextEncoder().encode(sse));
+		},
+	})), async () => {
+		await assert.rejects(
+			streamRewrite(settings, '', null, 'x', [], [], createSink().sink, new AbortController().signal, { vaultRoot: '', desktop: false, stallTimeoutMs: 60 }),
+			/没有收到任何新内容/,
+		);
+	});
 });
 
 test('current time carries weekday, timezone and offset', () => {

@@ -18,11 +18,15 @@ export interface StreamSink {
 
 /** Rule: 限制检索额度，避免模型反复搜索；额度用尽后不再带 tools 发起最后一轮，让模型基于已有资料收敛作答。 */
 const MAX_TOOL_ROUNDS = 10;
+/** 超过该时长没有收到任何新数据就中断请求，避免连接挂死后一直等下去。 */
+export const STALL_TIMEOUT_MS = 120_000;
 
 /** 工具运行环境：手机版没有本地文件系统，不提供文件读取。 */
 export interface RewriteRuntime {
 	vaultRoot: string;
 	desktop: boolean;
+	/** 覆盖停滞超时（毫秒）；主流程不传，测试用来验证中断。 */
+	stallTimeoutMs?: number;
 }
 
 const DEFAULT_RUNTIME: RewriteRuntime = { vaultRoot: '', desktop: false };
@@ -136,7 +140,7 @@ export async function streamRewrite(
 	let toolRounds = 0;
 	for (;;) {
 		const allowTools = tools.length > 0 && toolRounds < MAX_TOOL_ROUNDS;
-		const round = await requestRound(settings, messages, sink, signal, allowTools ? tools : []);
+		const round = await requestRound(settings, messages, sink, signal, allowTools ? tools : [], runtime.stallTimeoutMs ?? STALL_TIMEOUT_MS);
 		if (!round.finished || !['stop', 'tool_calls'].includes(round.finish ?? '')) {
 			throw new Error('AI 输出不完整或为空，原文未改变');
 		}
@@ -228,6 +232,7 @@ async function requestRound(
 	sink: StreamSink,
 	signal: AbortSignal,
 	tools: readonly unknown[],
+	stallTimeoutMs: number,
 ): Promise<StreamRound> {
 	const body = JSON.stringify({
 		model: settings.model,
@@ -237,6 +242,26 @@ async function requestRound(
 		messages,
 	});
 	if (new Blob([body]).size > MAX_REQUEST_BYTES) throw new Error('图片与文本超过 48 MiB 请求限制，请移除部分图片');
+	// Effect: 连接挂死时服务端不再发数据，read() 会一直等待；这里按“最后收到数据的时间”中断。
+	const requestController = new AbortController();
+	let stalled = false;
+	let lastDataAt = Date.now();
+	const abortOnCancel = () => requestController.abort();
+	signal.addEventListener('abort', abortOnCancel, { once: true });
+	// Effect: 停滞时除了断开连接，还要让挂起的 read() 立即结束，不依赖底层实现对 abort 的处理。
+	let stallReject: ((error: Error) => void) | null = null;
+	const stallPromise = new Promise<never>((_, reject) => { stallReject = reject; });
+	stallPromise.catch(() => {});
+	const stallTimer = window.setInterval(() => {
+		if (Date.now() - lastDataAt <= stallTimeoutMs) return;
+		stalled = true;
+		requestController.abort();
+		stallReject?.(new Error(stallError(stallTimeoutMs)));
+	}, Math.max(25, Math.min(1000, Math.floor(stallTimeoutMs / 4))));
+	const stopWatchdog = () => {
+		window.clearInterval(stallTimer);
+		signal.removeEventListener('abort', abortOnCancel);
+	};
 	let response: Response;
 	try {
 		// Rule: requestUrl 会缓冲响应，无法逐段展示 SSE；跨域失败显式暴露。
@@ -244,13 +269,19 @@ async function requestRound(
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey}` },
 			body,
-			signal,
+			signal: requestController.signal,
 		});
 	} catch {
 		// Failure: 不暴露服务端异常正文（可能包含选区或密钥）；不伪造流式体验。
-		throw new Error(signal.aborted ? '改写已取消' : '无法建立流式连接，请检查网络及接口的跨域支持');
+		stopWatchdog();
+		if (signal.aborted) throw new Error('改写已取消');
+		if (stalled) throw new Error(stallError(stallTimeoutMs));
+		throw new Error('无法建立流式连接，请检查网络及接口的跨域支持');
 	}
-	if (!response.ok || !response.body) throw new Error(`AI 请求失败（HTTP ${response.status}），请检查接口、模型和密钥`);
+	if (!response.ok || !response.body) {
+		stopWatchdog();
+		throw new Error(`AI 请求失败（HTTP ${response.status}），请检查接口、模型和密钥`);
+	}
 
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
@@ -330,7 +361,8 @@ async function requestRound(
 	};
 	try {
 		while (!finished) {
-			const chunk = await reader.read();
+			const chunk = await Promise.race([reader.read(), stallPromise]);
+			lastDataAt = Date.now();
 			if (chunk.done) {
 				buffer += decoder.decode();
 				if (buffer.trim()) lines.push(buffer.replace(/\r$/, ''));
@@ -348,13 +380,16 @@ async function requestRound(
 		}
 	} catch (error) {
 		if (signal.aborted) throw new Error('改写已取消');
+		if (stalled) throw new Error(stallError(stallTimeoutMs));
 		if (callbackError !== null) throw callbackError instanceof Error ? callbackError : new Error('编辑器预览更新失败');
 		if (error instanceof Error && error.message.startsWith('AI 返回了')) throw error;
 		throw new Error('AI 流式响应中断，原文未改变');
 	} finally {
 		void reader.cancel().catch(() => {});
+		stopWatchdog();
 	}
 	if (signal.aborted) throw new Error('改写已取消');
+	if (stalled) throw new Error(stallError(stallTimeoutMs));
 	return {
 		content,
 		reasoning,
@@ -362,4 +397,8 @@ async function requestRound(
 		finish,
 		finished,
 	};
+}
+
+function stallError(stallTimeoutMs: number): string {
+	return `超过 ${stallTimeoutMs / 1000} 秒没有收到任何新内容，已中断本次生成，请重试`;
 }
