@@ -23,12 +23,12 @@ export interface LockedRange {
 	expanded?: boolean;
 }
 
-export const setLock = StateEffect.define<LockedRange>();
-export const clearLock = StateEffect.define<void>();
+const setLock = StateEffect.define<LockedRange>();
+const clearLock = StateEffect.define<void>();
 /** 追加思考内容。 */
-export const appendThinking = StateEffect.define<string>();
+const appendThinking = StateEffect.define<string>();
 /** 写入一行工具进度：同一 id 原地更新（调用与结果同行），新 id 追加。 */
-export const setProgress = StateEffect.define<ProgressEntry>();
+const setProgress = StateEffect.define<ProgressEntry>();
 /** 展开或收起过程面板。 */
 export const toggleProcess = StateEffect.define<void>();
 const ownApply = Annotation.define<boolean>();
@@ -261,6 +261,94 @@ export const lockedRange = StateField.define<LockedRange | null>({
 	}),
 });
 
+/** Flow: 一次改写持有一个编辑器范围；会话只发送预览事件，不拼装锁的状态事务。 */
+export class SelectionPreview {
+	private preview = '';
+	private thinkingBuffer = '';
+
+	private constructor(private view: EditorView, private original: string) {}
+
+	static open(view: EditorView, from: number, to: number, original: string): SelectionPreview | null {
+		if (view.state.field(lockedRange) || view.state.doc.sliceString(from, to) !== original) return null;
+		view.dispatch({ effects: setLock.of({ from, to, phase: 'prompt', preview: '' }) });
+		return new SelectionPreview(view, original);
+	}
+
+	static isLocked(view: EditorView): boolean {
+		return !!view.state.field(lockedRange, false);
+	}
+
+	static release(view: EditorView): void {
+		if (view.state.field(lockedRange, false) !== undefined) view.dispatch({ effects: clearLock.of(undefined) });
+	}
+
+	start(): Pick<LockedRange, 'from' | 'to'> | null {
+		const range = this.view.state.field(lockedRange);
+		if (!range) return null;
+		this.view.dispatch({ effects: setLock.of({ ...range, phase: 'stream' }) });
+		return { from: range.from, to: range.to };
+	}
+
+	appendText(text: string): void {
+		this.ensureLocked();
+		this.preview += text;
+	}
+
+	appendReasoning(text: string): void {
+		this.ensureLocked();
+		this.thinkingBuffer += text;
+	}
+
+	progress(id: string, text: string, done: boolean): void {
+		this.view.dispatch({ effects: setProgress.of({ id, text, done }) });
+	}
+
+	/** Effect: 思考与正文在调用者安排的同一帧中合成一次编辑器事务。 */
+	flush(): void {
+		const current = this.view.state.field(lockedRange, false);
+		if (!current || this.view.state.doc.sliceString(current.from, current.to) !== this.original) return;
+		const thinking = this.thinkingBuffer;
+		this.thinkingBuffer = '';
+		this.view.dispatch({
+			effects: [
+				setLock.of({ ...current, phase: 'stream', preview: this.preview }),
+				...(thinking ? [appendThinking.of(thinking)] : []),
+			],
+		});
+	}
+
+	reset(): void {
+		this.preview = '';
+		const current = this.view.state.field(lockedRange, false);
+		if (current) this.view.dispatch({ effects: setLock.of({ ...current, phase: 'stream', preview: '' }) });
+	}
+
+	complete(result: string): void {
+		const current = this.view.state.field(lockedRange);
+		if (!current || this.view.state.doc.sliceString(current.from, current.to) !== this.original) {
+			throw new Error('原文已变化');
+		}
+		this.view.dispatch({ effects: setLock.of({ ...current, phase: 'review', preview: result }) });
+	}
+
+	retry(): boolean {
+		const current = this.view.state.field(lockedRange, false);
+		if (!current) return false;
+		this.preview = '';
+		this.thinkingBuffer = '';
+		this.view.dispatch({ effects: setLock.of({ from: current.from, to: current.to, phase: 'prompt', preview: '' }) });
+		return true;
+	}
+
+	apply(result: string): void {
+		applyLocked(this.view, this.original, result);
+	}
+
+	private ensureLocked(): void {
+		if (!this.view.state.field(lockedRange, false)) throw new Error('原文已变化');
+	}
+}
+
 export const selectionGuard: Extension = [
 	lockedRange,
 	Prec.highest(EditorState.transactionFilter.of((tr) => {
@@ -278,7 +366,7 @@ export const selectionGuard: Extension = [
 	})),
 ];
 
-export function applyLocked(view: EditorView, original: string, replacement: string): void {
+function applyLocked(view: EditorView, original: string, replacement: string): void {
 	const range = view.state.field(lockedRange);
 	if (!range || range.phase !== 'review' || view.state.doc.sliceString(range.from, range.to) !== original) {
 		throw new Error('原文或插入位置已变化，请重新生成');

@@ -5,7 +5,7 @@ import { buildContext } from './context';
 import { DiffModal } from './diff-modal';
 import { createSelectionExtension, findEditorView } from './editor-views';
 import { PromptModal, type PromptDraft } from './prompt-modal';
-import { appendThinking, applyLocked, clearLock, lockedRange, setLock, setProgress } from './selection-lock';
+import { SelectionPreview } from './selection-lock';
 import { AiSettingTab, DEFAULT_SETTINGS, normalizeContextLimit, normalizeFileReadScope, type AiSettings } from './settings';
 import { extractUrls, readWebPages } from './web';
 
@@ -18,6 +18,7 @@ interface RewriteSession {
 	file: TFile;
 	info: MarkdownFileInfo;
 	original: string;
+	selection: SelectionPreview;
 	status: 'prompt' | 'stream' | 'review';
 }
 
@@ -49,11 +50,11 @@ export default class AiRewritePlugin extends Plugin {
 					if (!checking) this.cancel(this.session);
 					return true;
 				}
-				const orphaned = [...this.views].filter((view) => view.state.field(lockedRange, false));
+				const orphaned = [...this.views].filter((view) => SelectionPreview.isLocked(view));
 				if (!orphaned.length) return false;
 				if (!checking) {
-					for (const view of orphaned) view.dispatch({ effects: clearLock.of(undefined) });
-					if (orphaned.some((view) => view.state.field(lockedRange, false))) {
+					for (const view of orphaned) SelectionPreview.release(view);
+					if (orphaned.some((view) => SelectionPreview.isLocked(view))) {
 						new Notice('预览未能清除，请重启 Obsidian 并重新打开笔记');
 					}
 				}
@@ -105,12 +106,12 @@ export default class AiRewritePlugin extends Plugin {
 		const from = editor.posToOffset(editor.getCursor('from'));
 		const to = editor.posToOffset(editor.getCursor('to'));
 		const original = editor.getRange(editor.getCursor('from'), editor.getCursor('to'));
-		if (view.state.field(lockedRange) || view.state.doc.sliceString(from, to) !== original) {
+		const selection = SelectionPreview.open(view, from, to, original);
+		if (!selection) {
 			new Notice('选区与当前笔记不一致，请重新选择后重试');
 			return;
 		}
-		const session: RewriteSession = { editor, view, file, info, original, status: 'prompt' };
-		view.dispatch({ effects: setLock.of({ from, to, phase: 'prompt', preview: '' }) });
+		const session: RewriteSession = { editor, view, file, info, original, selection, status: 'prompt' };
 		this.session = session;
 		this.showPrompt(session, null);
 	}
@@ -133,33 +134,20 @@ export default class AiRewritePlugin extends Plugin {
 			return;
 		}
 		session.status = 'stream';
-		const range = session.view.state.field(lockedRange);
+		const range = session.selection.start();
 		if (!range) {
 			this.cancel(session, '选区已失效，生成已取消');
 			return;
 		}
-		session.view.dispatch({ effects: setLock.of({ ...range, phase: 'stream' }) });
 		const controller = new AbortController();
 		this.controller = controller;
 		// Rule: 上下文在提交时从当前文档取，只用于理解语境，不扩大锁定与写回范围。
 		const context = buildContext(session.view.state.doc.toString(), range.from, range.to, this.settings.contextLimit);
-		let preview = '';
-		let thinkingBuffer = '';
 		let flushFrame: number | null = null;
 		let lastFlushAt = 0;
 		// Effect: 用 requestAnimationFrame 按帧调度（后台标签页不空转），并保证最小间隔；思考与正文合并成一次事务。
 		const flush = (): void => {
-			if (!this.valid(session)) return;
-			const current = session.view.state.field(lockedRange, false);
-			if (!current || session.view.state.doc.sliceString(current.from, current.to) !== session.original) return;
-			const thinking = thinkingBuffer;
-			thinkingBuffer = '';
-			session.view.dispatch({
-				effects: [
-					setLock.of({ ...current, phase: 'stream', preview }),
-					...(thinking ? [appendThinking.of(thinking)] : []),
-				],
-			});
+			if (this.valid(session)) session.selection.flush();
 		};
 		const scheduleFlush = (): void => {
 			if (flushFrame !== null) return;
@@ -176,12 +164,11 @@ export default class AiRewritePlugin extends Plugin {
 		};
 		const pushThinking = (text: string) => {
 			if (!this.valid(session)) throw new Error('文件已变化');
-			if (!session.view.state.field(lockedRange, false)) throw new Error('原文已变化');
-			thinkingBuffer += text;
+			session.selection.appendReasoning(text);
 			scheduleFlush();
 		};
 		const pushProgress = (id: string, text: string, done: boolean) => {
-			if (this.valid(session)) session.view.dispatch({ effects: setProgress.of({ id, text, done }) });
+			if (this.valid(session)) session.selection.progress(id, text, done);
 		};
 		try {
 			// Effect: 链接与检索进度写进预览卡片的过程面板；失败由外层统一取消并提示，原文不变。
@@ -192,31 +179,23 @@ export default class AiRewritePlugin extends Plugin {
 			const result = await streamRewrite({ ...this.settings }, session.original, context, instruction, images, pages, {
 				delta: (delta) => {
 					if (!this.valid(session)) throw new Error('文件已变化');
-					if (!session.view.state.field(lockedRange, false)) throw new Error('原文已变化');
-					preview += delta;
+					session.selection.appendText(delta);
 					scheduleFlush();
 				},
 				// Effect: 工具轮的说明文字不是最终结果，丢弃后只保留最终回答。
 				reset: () => {
-					preview = '';
-					if (!this.valid(session)) return;
-					const current = session.view.state.field(lockedRange, false);
-					if (current) session.view.dispatch({ effects: setLock.of({ ...current, phase: 'stream', preview: '' }) });
+					if (this.valid(session)) session.selection.reset();
 				},
 				reasoning: pushThinking,
 				progress: pushProgress,
 			}, controller.signal, this.readRuntime());
 			if (!this.valid(session)) throw new Error('文件已变化');
-			const current = session.view.state.field(lockedRange);
-			if (!current || session.view.state.doc.sliceString(current.from, current.to) !== session.original) {
-				throw new Error('原文已变化');
-			}
+			session.selection.complete(result);
 			this.controller = null;
 			session.status = 'review';
-			session.view.dispatch({ effects: setLock.of({ ...current, phase: 'review', preview: result }) });
 			const modal = new DiffModal(this.app, session.original, result, () => {
 				if (!this.valid(session)) throw new Error('文件已变化，请重新生成');
-				applyLocked(session.view, session.original, result);
+				session.selection.apply(result);
 				this.session = null;
 			}, () => {
 				if (this.review === modal) this.review = null;
@@ -227,13 +206,11 @@ export default class AiRewritePlugin extends Plugin {
 		} catch (error) {
 			if (this.session !== session) return;
 			const message = error instanceof Error ? error.message : '生成失败，原文未改变';
-			const current = this.valid(session) ? session.view.state.field(lockedRange, false) : undefined;
-			if (current) {
+			if (this.valid(session) && session.selection.retry()) {
 				// Effect: 生成失败且选区仍有效时回到输入框，保留已输入的指令与图片。
 				this.controller?.abort();
 				this.controller = null;
 				session.status = 'prompt';
-				session.view.dispatch({ effects: setLock.of({ from: current.from, to: current.to, phase: 'prompt', preview: '' }) });
 				new Notice(message);
 				this.showPrompt(session, { instruction, images });
 				return;
@@ -261,9 +238,8 @@ export default class AiRewritePlugin extends Plugin {
 		this.controller = null;
 		this.prompt?.close();
 		this.review?.dismiss();
-		if ((this.views.has(session.view) || (session.editor as Editor & { cm?: EditorView }).cm === session.view) &&
-			session.view.state.field(lockedRange, false) !== undefined) {
-			session.view.dispatch({ effects: clearLock.of(undefined) });
+		if (this.views.has(session.view) || (session.editor as Editor & { cm?: EditorView }).cm === session.view) {
+			SelectionPreview.release(session.view);
 		}
 		if (message) new Notice(message);
 	}
