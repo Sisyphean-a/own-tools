@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { history, undo } from '@codemirror/commands';
 import { EditorState } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import { applyLocked, clearLock, lockedRange, selectionGuard, setLock } from '../src/selection-lock';
+import { appendThinking, applyLocked, clearLock, lockedRange, quietHint, QUIET_HINT_SECONDS, selectionGuard, setLock, setProgress, toggleProcess } from '../src/selection-lock';
 
 function holder(selected = true) {
 	const from = 4;
@@ -78,6 +78,39 @@ test('confirmation cannot leave a review card after host strips effects from a d
 	applyLocked(view as unknown as EditorView, '原文', '新文');
 	assert.equal(view.state.doc.toString(), '新文');
 	assert.equal(view.state.field(lockedRange), null);
+});
+
+test('thinking and tool progress accumulate in preview state, and review collapses the panel', () => {
+	const view = holder();
+	view.dispatch({ effects: setProgress.of({ id: 'links', text: '正在读取 1 个链接…', done: false }) });
+	view.dispatch({ effects: appendThinking.of('先看资料。') });
+	view.dispatch({ effects: appendThinking.of('再下结论。') });
+	view.dispatch({ effects: setProgress.of({ id: 'links', text: '已读取 1 个链接', done: true }) });
+	view.dispatch({ effects: setProgress.of({ id: 'call_1', text: '正在联网检索：x', done: false }) });
+	assert.deepEqual(view.state.field(lockedRange)?.progress, [
+		{ id: 'links', text: '已读取 1 个链接', done: true },
+		{ id: 'call_1', text: '正在联网检索：x', done: false },
+	]);
+	assert.equal(view.state.field(lockedRange)?.thinking, '先看资料。再下结论。');
+	assert.equal(view.state.field(lockedRange)?.activity, '正在联网检索：x');
+	view.dispatch({ effects: setProgress.of({ id: 'call_1', text: '联网检索完成，返回 3 条结果', done: true }) });
+	assert.equal(view.state.field(lockedRange)?.progress?.length, 2);
+	assert.equal(view.state.field(lockedRange)?.progress?.[1]?.text, '联网检索完成，返回 3 条结果');
+	view.dispatch({ effects: appendThinking.of('继续想') });
+	assert.equal(view.state.field(lockedRange)?.activity, undefined);
+	view.dispatch({ effects: toggleProcess.of(undefined) });
+	assert.equal(view.state.field(lockedRange)?.expanded, false);
+	const current = view.state.field(lockedRange);
+	assert.ok(current);
+	view.dispatch({ effects: setLock.of({ ...current, phase: 'review', preview: '结果' }) });
+	assert.equal(view.state.field(lockedRange)?.expanded, false);
+	assert.equal(view.state.field(lockedRange)?.thinking, '先看资料。再下结论。继续想');
+});
+
+test('quiet hint only appears while streaming after a long silence', () => {
+	assert.equal(quietHint('stream', 1000, 1000 + (QUIET_HINT_SECONDS - 1) * 1000), null);
+	assert.match(quietHint('stream', 1000, 1000 + (QUIET_HINT_SECONDS + 4) * 1000) ?? '', /已 12 秒没有新内容/);
+	assert.equal(quietHint('review', 1000, 1000 + 60_000), null);
 });
 
 test('external bypass that changes original is rejected instead of overwritten', () => {

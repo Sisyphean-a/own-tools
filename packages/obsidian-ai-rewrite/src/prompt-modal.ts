@@ -20,10 +20,10 @@ export class PromptModal extends Modal {
 
 	onOpen(): void {
 		this.titleEl.setText(this.hasSelection ? '改写选中文字' : '在光标处生成内容');
-		this.contentEl.createEl('p', { text: '输入要求，可粘贴图片作为参考。Enter 提交，Shift + Enter 换行。' });
+		this.contentEl.createEl('p', { text: '输入要求，可粘贴图片作为参考；指令中的链接会先读取网页正文，开启联网搜索后模型可自行检索网页。Enter 提交，Shift + Enter 换行。' });
 		this.input = this.contentEl.createEl('textarea', {
 			cls: 'ai-rewrite-input',
-			attr: { placeholder: this.hasSelection ? '例如：改得更通顺一些' : '例如：写一段会议摘要', 'aria-label': '写作要求' },
+			attr: { placeholder: this.hasSelection ? '例如：改得更通顺一些' : '例如：总结这个链接 https://example.com/article', 'aria-label': '写作要求' },
 		});
 		this.input.addEventListener('keydown', (event) => {
 			if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {

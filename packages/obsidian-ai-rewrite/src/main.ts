@@ -5,8 +5,9 @@ import { buildContext } from './context';
 import { DiffModal } from './diff-modal';
 import { createSelectionExtension, findEditorView } from './editor-views';
 import { PromptModal } from './prompt-modal';
-import { applyLocked, clearLock, lockedRange, setLock } from './selection-lock';
+import { appendThinking, applyLocked, clearLock, lockedRange, setLock, setProgress } from './selection-lock';
 import { AiSettingTab, DEFAULT_SETTINGS, normalizeContextLimit, type AiSettings } from './settings';
+import { extractUrls, readWebPages } from './web';
 
 interface RewriteSession {
 	editor: Editor;
@@ -134,15 +135,37 @@ export default class AiRewritePlugin extends Plugin {
 		// Rule: 上下文在提交时从当前文档取，只用于理解语境，不扩大锁定与写回范围。
 		const context = buildContext(session.view.state.doc.toString(), range.from, range.to, this.settings.contextLimit);
 		let preview = '';
+		const pushThinking = (text: string) => {
+			if (this.valid(session)) session.view.dispatch({ effects: appendThinking.of(text) });
+		};
+		const pushProgress = (id: string, text: string, done: boolean) => {
+			if (this.valid(session)) session.view.dispatch({ effects: setProgress.of({ id, text, done }) });
+		};
 		try {
-			const result = await streamRewrite({ ...this.settings }, session.original, context, instruction, images, (delta) => {
-				if (!this.valid(session)) throw new Error('文件已变化');
-				const current = session.view.state.field(lockedRange);
-				if (!current || session.view.state.doc.sliceString(current.from, current.to) !== session.original) {
-					throw new Error('原文已变化');
-				}
-				preview += delta;
-				session.view.dispatch({ effects: setLock.of({ ...current, phase: 'stream', preview }) });
+			// Effect: 链接与检索进度写进预览卡片的过程面板；失败由外层统一取消并提示，原文不变。
+			const urls = extractUrls(instruction);
+			if (urls.length) pushProgress('links', `正在读取 ${urls.length} 个链接…`, false);
+			const pages = await readWebPages(urls, controller.signal);
+			if (urls.length) pushProgress('links', `已读取 ${urls.length} 个链接`, true);
+			const result = await streamRewrite({ ...this.settings }, session.original, context, instruction, images, pages, {
+				delta: (delta) => {
+					if (!this.valid(session)) throw new Error('文件已变化');
+					const current = session.view.state.field(lockedRange);
+					if (!current || session.view.state.doc.sliceString(current.from, current.to) !== session.original) {
+						throw new Error('原文已变化');
+					}
+					preview += delta;
+					session.view.dispatch({ effects: setLock.of({ ...current, phase: 'stream', preview }) });
+				},
+				// Effect: 工具轮的说明文字不是最终结果，丢弃后只保留最终回答。
+				reset: () => {
+					preview = '';
+					if (!this.valid(session)) return;
+					const current = session.view.state.field(lockedRange, false);
+					if (current) session.view.dispatch({ effects: setLock.of({ ...current, phase: 'stream', preview: '' }) });
+				},
+				reasoning: pushThinking,
+				progress: pushProgress,
 			}, controller.signal);
 			if (!this.valid(session)) throw new Error('文件已变化');
 			const current = session.view.state.field(lockedRange);
