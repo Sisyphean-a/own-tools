@@ -1,12 +1,12 @@
 import { EditorView } from '@codemirror/view';
-import { Editor, MarkdownFileInfo, MarkdownView, Notice, Plugin, TFile, editorInfoField } from 'obsidian';
-import { streamRewrite, validateSettings } from './ai';
+import { Editor, FileSystemAdapter, MarkdownFileInfo, MarkdownView, Notice, Platform, Plugin, TFile, editorInfoField } from 'obsidian';
+import { streamRewrite, validateSettings, type RewriteRuntime } from './ai';
 import { buildContext } from './context';
 import { DiffModal } from './diff-modal';
 import { createSelectionExtension, findEditorView } from './editor-views';
 import { PromptModal } from './prompt-modal';
 import { appendThinking, applyLocked, clearLock, lockedRange, setLock, setProgress } from './selection-lock';
-import { AiSettingTab, DEFAULT_SETTINGS, normalizeContextLimit, type AiSettings } from './settings';
+import { AiSettingTab, DEFAULT_SETTINGS, normalizeContextLimit, normalizeFileReadScope, type AiSettings } from './settings';
 import { extractUrls, readWebPages } from './web';
 
 interface RewriteSession {
@@ -29,6 +29,7 @@ export default class AiRewritePlugin extends Plugin {
 	async onload(): Promise<void> {
 		this.settings = { ...DEFAULT_SETTINGS, ...await this.loadData() as Partial<AiSettings> };
 		this.settings.contextLimit = normalizeContextLimit(this.settings.contextLimit);
+		this.settings.fileReadScope = normalizeFileReadScope(this.settings.fileReadScope);
 		this.registerEditorExtension(createSelectionExtension(this.views));
 		this.addSettingTab(new AiSettingTab(this.app, this));
 		this.addCommand({
@@ -166,7 +167,7 @@ export default class AiRewritePlugin extends Plugin {
 				},
 				reasoning: pushThinking,
 				progress: pushProgress,
-			}, controller.signal);
+			}, controller.signal, this.readRuntime());
 			if (!this.valid(session)) throw new Error('文件已变化');
 			const current = session.view.state.field(lockedRange);
 			if (!current || session.view.state.doc.sliceString(current.from, current.to) !== session.original) {
@@ -191,13 +192,23 @@ export default class AiRewritePlugin extends Plugin {
 		}
 	}
 
+	/** Flow: 组合文件读取需要的运行环境；手机版或非文件系统适配器时不可用。 */
+	private readRuntime(): RewriteRuntime {
+		const adapter = this.app.vault.adapter;
+		const filesystem = adapter instanceof FileSystemAdapter;
+		return {
+			desktop: Platform.isDesktopApp && filesystem,
+			vaultRoot: filesystem ? adapter.getBasePath() : '',
+		};
+	}
+
 	private cancel(session: RewriteSession, message?: string): void {
 		if (this.session !== session) return;
 		this.session = null;
 		this.controller?.abort();
 		this.controller = null;
 		this.prompt?.close();
-		this.review?.close();
+		this.review?.dismiss();
 		if ((this.views.has(session.view) || (session.editor as Editor & { cm?: EditorView }).cm === session.view) &&
 			session.view.state.field(lockedRange, false) !== undefined) {
 			session.view.dispatch({ effects: clearLock.of(undefined) });

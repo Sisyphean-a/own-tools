@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { streamRewrite, validateSettings, type StreamSink } from '../src/ai';
+import { formatCurrentTime, streamRewrite, validateSettings, type StreamSink } from '../src/ai';
 import { DEFAULT_SETTINGS } from '../src/settings';
 import { setRequestUrlHandler, type RequestUrlHandler, type RequestUrlResponse } from './obsidian-stub';
 
@@ -103,6 +106,7 @@ test('explicit thinking levels are sent as documented, without changing the defa
 		searchEnabled: false,
 		searchEndpoint: 'https://api.tavily.com/search',
 		searchApiKey: '',
+		fileReadScope: 'off',
 	});
 });
 
@@ -266,6 +270,11 @@ test('web_search tool calls run between rounds and reasoning stays out of the re
 	assert.equal(body.messages[3]!.tool_call_id, 'call_1');
 	assert.match(String(body.messages[3]!.content), /https:\/\/news\.example\/1/);
 	assert.match(String(body.messages[0]!.content), /web_search/);
+	assert.match(String(body.messages[0]!.content), /currentTime/);
+	assert.match(
+		(JSON.parse(String(body.messages[1]!.content)) as { currentTime?: string }).currentTime as string,
+		/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}（.+，.+，UTC[+-]\d{2}:\d{2}）$/,
+	);
 });
 
 test('search failures cancel the request instead of answering without sources', async () => {
@@ -311,11 +320,78 @@ test('exhausted search budget forces a final answer instead of failing the user'
 	assert.equal(requests.length, 11);
 	const last = JSON.parse(requests[10]!) as { tools?: unknown[]; messages: { role: string; content?: unknown }[] };
 	assert.equal('tools' in last, false);
-	assert.match(String(last.messages.at(-1)?.content), /检索上限/);
+	assert.match(String(last.messages.at(-1)?.content), /工具调用上限/);
 });
 
 test('search settings are validated before any request', async () => {
 	assert.match(validateSettings({ ...searchSettings, searchApiKey: ' ' }) ?? '', /搜索 API 密钥/);
 	assert.match(validateSettings({ ...searchSettings, searchEndpoint: 'http://example.test/search' }) ?? '', /HTTPS/);
 	assert.equal(validateSettings({ ...searchSettings, searchEndpoint: 'http://127.0.0.1:8080/search' }), null);
+	assert.match(validateSettings({ ...settings, fileReadScope: 'bad' as 'off' }) ?? '', /文件读取范围/);
+});
+
+test('current time carries weekday, timezone and offset', () => {
+	assert.match(formatCurrentTime(new Date(2026, 8, 28, 15, 32, 5)), /^2026-09-28 15:32:05（.+，.+，UTC[+-]\d{2}:\d{2}）$/);
+});
+
+test('read_file tool calls read a local text file with a single progress row', async () => {
+	const dir = await mkdtemp(join(tmpdir(), 'ai-rewrite-read-'));
+	try {
+		await writeFile(join(dir, 'notes.md'), '第一行\n第二行', 'utf8');
+		const first = chunkEvent({ tool_calls: [{ index: 0, id: 'call_read', type: 'function', function: { name: 'read_file', arguments: '{"path":"notes.md"}' } }] }, 'tool_calls') + DONE;
+		const second = chunkEvent({ content: '文件里有两行。' }, 'stop') + DONE;
+		const requests: string[] = [];
+		await withFetch(async (_url, init) => {
+			requests.push(init?.body as string);
+			return stream([new TextEncoder().encode(requests.length === 1 ? first : second)]);
+		}, async () => {
+			const { sink, chunks, progress } = createSink();
+			const result = await streamRewrite(
+				{ ...settings, fileReadScope: 'vault' },
+				'',
+				null,
+				'读一下 notes.md',
+				[],
+				[],
+				sink,
+				new AbortController().signal,
+				{ vaultRoot: dir, desktop: true },
+			);
+			assert.equal(result, '文件里有两行。');
+			assert.deepEqual(chunks, ['文件里有两行。']);
+			assert.deepEqual(progress, [
+				{ id: 'call_read', text: '正在读取文件：notes.md', done: false },
+				{ id: 'call_read', text: '已读取 notes.md（第 1-2 行 / 共 2 行）', done: true },
+			]);
+		});
+		const body = JSON.parse(requests[1]!) as { tools?: { function: { name: string } }[]; messages: { role: string; content?: unknown }[] };
+		assert.deepEqual(body.tools?.map((tool) => tool.function.name), ['read_file']);
+		assert.match(String(body.messages[3]!.content), /第一行\n第二行/);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test('file reading is not offered without a desktop runtime, and no tools means no currentTime', async () => {
+	const sse = chunkEvent({ content: '结果' }, 'stop') + DONE;
+	let request: RequestInit | undefined;
+	await withFetch(async (_url, init) => {
+		request = init;
+		return stream([new TextEncoder().encode(sse)]);
+	}, async () => {
+		await streamRewrite(
+			{ ...settings, fileReadScope: 'vault' },
+			'',
+			null,
+			'x',
+			[],
+			[],
+			createSink().sink,
+			new AbortController().signal,
+			{ vaultRoot: '/tmp', desktop: false },
+		);
+	});
+	const body = JSON.parse(request?.body as string) as { tools?: unknown[]; messages: { content: string }[] };
+	assert.equal('tools' in body, false);
+	assert.equal('currentTime' in (JSON.parse(body.messages[1]!.content) as object), false);
 });

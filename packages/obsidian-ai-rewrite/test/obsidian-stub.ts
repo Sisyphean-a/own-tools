@@ -2,6 +2,7 @@ export class PluginSettingTab {}
 export class Setting {}
 export class MarkdownView {}
 export const editorInfoField = Symbol('editorInfoField');
+export const Platform = { isDesktop: true, isDesktopApp: true, isMobile: false, isMobileApp: false };
 
 export interface RequestUrlParam {
 	url: string;
