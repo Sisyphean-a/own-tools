@@ -201,39 +201,186 @@
   object-fit: contain;
 }
 
+/* Rule: 确认框尽量占满窗口，差异视图占满剩余高度，标题与按钮始终可见。 */
 .ai-rewrite-diff-modal {
-  width: min(46rem, 90vw);
+  display: flex;
+  flex-direction: column;
+  width: min(80rem, 94vw);
+  max-width: 94vw;
+  height: min(88vh, 60rem);
+  max-height: 94vh;
 }
 
-.ai-rewrite-diff {
-  max-height: min(50vh, 28rem);
-  overflow: auto;
-  padding: 1rem;
+.ai-rewrite-diff-modal .modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ai-rewrite-diff-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+
+/* Rule: 按钮行不随差异视图压缩，窗口变小时只缩小视图本身。 */
+.ai-rewrite-diff-modal .modal-content > .setting-item {
+  flex: 0 0 auto;
+}
+
+.ai-rewrite-diff-hint {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.ai-rewrite-diff-toggle {
+  display: flex;
+  margin-left: auto;
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-s);
-  background: var(--background-secondary);
-  color: var(--text-normal);
+  overflow: hidden;
+}
+
+.ai-rewrite-diff-tab {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0.25rem 0.9rem;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+}
+
+.ai-rewrite-diff-tab.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.ai-rewrite-diff-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  user-select: text;
+}
+
+/* Effect: 栏标题只在左右视图出现，用来区分哪侧是原文。 */
+.ai-rewrite-diff-labels {
+  display: none;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 0.3rem;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.ai-rewrite-diff-modal.is-split .ai-rewrite-diff-labels {
+  display: grid;
+}
+
+/* Effect: 左右视图由合并视图统一滚动两侧；内联视图由 .ai-rewrite-inline-diff 自己滚动。 */
+.ai-rewrite-diff-view .cm-mergeView {
+  height: 100%;
+  overflow: auto;
+}
+
+/* Rule: CodeMirror 默认只在改动词下画 2px 描线、行底色只有 8%，在主题下几乎看不见；
+   这里用主题色重绘：改动行给底色，改动词给实色块。 */
+.ai-rewrite-diff-view .cm-merge-a .cm-changedLine {
+  background-color: color-mix(in srgb, var(--text-error, #e93147) 13%, transparent);
+}
+
+.ai-rewrite-diff-view .cm-merge-b .cm-changedLine {
+  background-color: color-mix(in srgb, var(--text-success, #08b94e) 16%, transparent);
+}
+
+.ai-rewrite-diff-view .cm-merge-a .cm-changedText {
+  background: color-mix(in srgb, var(--text-error, #e93147) 34%, transparent);
+  border-radius: 2px;
+}
+
+.ai-rewrite-diff-view .cm-merge-b .cm-changedText {
+  background: color-mix(in srgb, var(--text-success, #08b94e) 38%, transparent);
+  border-radius: 2px;
+}
+
+/* Effect: 内联视图按行对齐：行号列 + 标记列 + 正文列，长行在正文列内换行。 */
+.ai-rewrite-inline-diff {
+  height: 100%;
+  overflow: auto;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  line-height: 1.6;
+}
+
+.ai-diff-row {
+  display: grid;
+  grid-template-columns: 3.2em 3.2em 1.2em minmax(0, 1fr);
+  padding: 0 0.6rem 0 0.2rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  user-select: text;
-  line-height: 1.55;
 }
 
-.ai-rewrite-diff-removed {
-  color: var(--text-error);
-  text-decoration: line-through;
-  background: color-mix(in srgb, var(--text-error) 10%, transparent);
+.ai-diff-num {
+  padding-right: 0.5rem;
+  color: var(--text-faint);
+  text-align: right;
+  user-select: none;
 }
 
-.ai-rewrite-diff-added {
-  color: var(--text-success);
-  background: color-mix(in srgb, var(--text-success) 12%, transparent);
-}
-
-.ai-rewrite-diff-label {
-  margin: 0.65em 0 0.3em;
-  font-weight: 600;
+.ai-diff-sign {
   color: var(--text-muted);
+  user-select: none;
+}
+
+.ai-diff-row.is-removed {
+  background-color: color-mix(in srgb, var(--text-error, #e93147) 13%, transparent);
+}
+
+.ai-diff-row.is-added {
+  background-color: color-mix(in srgb, var(--text-success, #08b94e) 16%, transparent);
+}
+
+.ai-diff-row.is-removed .ai-diff-sign {
+  color: var(--text-error, #e93147);
+}
+
+.ai-diff-row.is-added .ai-diff-sign {
+  color: var(--text-success, #08b94e);
+}
+
+.ai-diff-row.is-removed .ai-diff-changed {
+  background: color-mix(in srgb, var(--text-error, #e93147) 32%, transparent);
+  border-radius: 2px;
+  text-decoration: line-through;
+}
+
+.ai-diff-row.is-added .ai-diff-changed {
+  background: color-mix(in srgb, var(--text-success, #08b94e) 36%, transparent);
+  border-radius: 2px;
+}
+
+.ai-diff-row.is-collapsed {
+  display: block;
+  padding: 0.1rem 0.6rem;
+  background: var(--background-secondary);
+}
+
+.ai-diff-expand {
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
 }
 
 @keyframes ai-rewrite-spin {
