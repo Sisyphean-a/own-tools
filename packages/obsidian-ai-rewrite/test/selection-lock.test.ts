@@ -138,6 +138,9 @@ test('thinking and tool progress accumulate in preview state, and review collaps
 	view.selection.progress('call_1', '联网检索完成，返回 3 条结果', true);
 	assert.equal(view.state.field(lockedRange)?.progress?.length, 2);
 	assert.equal(view.state.field(lockedRange)?.progress?.[1]?.text, '联网检索完成，返回 3 条结果');
+	view.selection.appendText('正文');
+	view.selection.flush();
+	assert.equal(view.state.field(lockedRange)?.activity, undefined);
 	view.selection.appendReasoning('继续想');
 	view.selection.flush();
 	assert.equal(view.state.field(lockedRange)?.activity, undefined);

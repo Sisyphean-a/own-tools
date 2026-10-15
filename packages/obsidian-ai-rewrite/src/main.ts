@@ -113,6 +113,7 @@ export default class AiRewritePlugin extends Plugin {
 		}
 		const session: RewriteSession = { editor, view, file, info, original, selection, status: 'prompt' };
 		this.session = session;
+		selection.setCancelHandler(() => this.cancel(session, '已取消生成'));
 		this.showPrompt(session, null);
 	}
 

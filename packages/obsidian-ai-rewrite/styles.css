@@ -40,10 +40,35 @@
   animation: ai-rewrite-spin 0.8s linear infinite;
 }
 
+.ai-rewrite-preview-status-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ai-rewrite-preview-elapsed {
+  flex: none;
   color: var(--text-muted);
   font-weight: normal;
   font-variant-numeric: tabular-nums;
+}
+
+.ai-rewrite-preview-cancel {
+  flex: none;
+  margin-left: auto;
+  padding: 0.15em 0.5em;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.2;
+}
+
+.ai-rewrite-preview-cancel:hover {
+  color: var(--text-normal);
+  border-color: var(--text-muted);
 }
 
 /* Rule: 这些元素显式设置了 display，[hidden] 需要同样显式生效。 */
@@ -178,6 +203,22 @@
   width: 100%;
   min-height: 5em;
   resize: vertical;
+}
+
+.ai-rewrite-input-error,
+.ai-rewrite-image-status {
+  margin-top: 0.35rem;
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller);
+}
+
+.ai-rewrite-image-status {
+  color: var(--text-muted);
+}
+
+.ai-rewrite-input-error[hidden],
+.ai-rewrite-image-status[hidden] {
+  display: none;
 }
 
 .ai-rewrite-images {

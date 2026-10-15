@@ -32,6 +32,8 @@ const setProgress = StateEffect.define<ProgressEntry>();
 /** 展开或收起过程面板。 */
 export const toggleProcess = StateEffect.define<void>();
 const ownApply = Annotation.define<boolean>();
+// Rule: 取消回调只按编辑器视图弱引用保存，不进入编辑器状态，避免状态快照长期持有插件会话。
+const cancelHandlers = new WeakMap<EditorView, () => void>();
 
 /** 无新内容超过该秒数时显示等待提示，避免看起来像卡死。 */
 export const QUIET_HINT_SECONDS = 8;
@@ -61,6 +63,8 @@ interface PreviewParts {
 	elapsedValue: Text;
 	quiet: HTMLElement;
 	quietValue: Text;
+	cancel: HTMLButtonElement;
+	cancelAvailable: boolean;
 	process: HTMLElement;
 	toggle: HTMLButtonElement;
 	processLabel: HTMLElement;
@@ -90,10 +94,24 @@ class PreviewWidget extends WidgetType {
 		root.className = 'ai-rewrite-preview';
 		const status = root.createSpan({ cls: 'ai-rewrite-preview-status' });
 		const spinner = status.createSpan({ cls: 'ai-rewrite-spinner', attr: { 'aria-hidden': 'true' } });
-		const statusLabel = status.createSpan({ cls: 'ai-rewrite-preview-status-label' });
+		const statusLabel = status.createSpan({ cls: 'ai-rewrite-preview-status-label', attr: { role: 'status', 'aria-live': 'polite' } });
 		const statusLabelValue = statusLabel.appendChild(doc.createTextNode(''));
 		const elapsed = status.createSpan({ cls: 'ai-rewrite-preview-elapsed' });
 		const elapsedValue = elapsed.appendChild(doc.createTextNode(''));
+		const cancelHandler = cancelHandlers.get(view);
+		const cancel = status.createEl('button', {
+			cls: 'ai-rewrite-preview-cancel',
+			text: '取消生成',
+			attr: { type: 'button', 'aria-label': '取消正在进行的 AI 改写' },
+		});
+		cancel.hidden = this.range.phase !== 'stream' || !cancelHandler;
+		if (cancelHandler) {
+			cancel.addEventListener('click', (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				cancelHandler();
+			});
+		}
 		const quiet = root.createDiv({ cls: 'ai-rewrite-quiet' });
 		const quietValue = quiet.appendChild(doc.createTextNode(''));
 		const process = root.createDiv({ cls: 'ai-rewrite-process' });
@@ -111,10 +129,11 @@ class PreviewWidget extends WidgetType {
 		const win = doc.defaultView;
 		const parts: PreviewParts = {
 			range: this.range, win, timer: null, startedAt: Date.now(), lastEventAt: Date.now(), signature: '', lastThinking: '', lastProgress: null,
-			spinner, statusLabel, statusLabelValue, elapsed, elapsedValue, quiet, quietValue,
+			spinner, statusLabel, statusLabelValue, elapsed, elapsedValue, quiet, quietValue, cancel, cancelAvailable: !!cancelHandler,
 			process, toggle, processLabel, processLabelValue, body, thinking, thinkingValue, tools, text, textValue,
 		};
 		previewParts.set(root, parts);
+		toggle.setAttribute('aria-label', '展开或收起思考与工具过程');
 		toggle.addEventListener('click', () => {
 			view.dispatch({ effects: toggleProcess.of(undefined) });
 		});
@@ -164,6 +183,7 @@ class PreviewWidget extends WidgetType {
 		const expanded = hasProcess && (this.range.expanded ?? true);
 		// Rule: 内部内容始终是纯文本，不做任何高亮或 Markdown 解析。
 		parts.spinner.hidden = !streaming;
+		parts.cancel.hidden = !streaming || !parts.cancelAvailable;
 		setTextData(parts.statusLabelValue, streaming ? 'AI 正在生成…' : '已完成 · 待确认');
 		setTextData(parts.elapsedValue, streaming ? `${elapsedSeconds(parts)}s` : '');
 		parts.process.hidden = !hasProcess;
@@ -279,7 +299,12 @@ export class SelectionPreview {
 	}
 
 	static release(view: EditorView): void {
+		cancelHandlers.delete(view);
 		if (view.state.field(lockedRange, false) !== undefined) view.dispatch({ effects: clearLock.of(undefined) });
+	}
+
+	setCancelHandler(handler: () => void): void {
+		cancelHandlers.set(this.view, handler);
 	}
 
 	start(): Pick<LockedRange, 'from' | 'to'> | null {
@@ -308,10 +333,11 @@ export class SelectionPreview {
 		const current = this.view.state.field(lockedRange, false);
 		if (!current || this.view.state.doc.sliceString(current.from, current.to) !== this.original) return;
 		const thinking = this.thinkingBuffer;
+		const textChanged = this.preview !== current.preview;
 		this.thinkingBuffer = '';
 		this.view.dispatch({
 			effects: [
-				setLock.of({ ...current, phase: 'stream', preview: this.preview }),
+				setLock.of({ ...current, phase: 'stream', preview: this.preview, ...(thinking || textChanged ? { activity: undefined } : {}) }),
 				...(thinking ? [appendThinking.of(thinking)] : []),
 			],
 		});
@@ -342,6 +368,7 @@ export class SelectionPreview {
 
 	apply(result: string): void {
 		applyLocked(this.view, this.original, result);
+		cancelHandlers.delete(this.view);
 	}
 
 	private ensureLocked(): void {

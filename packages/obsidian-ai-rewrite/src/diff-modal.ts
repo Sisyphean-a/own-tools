@@ -37,17 +37,22 @@ export class DiffModal extends Modal {
 		this.blockDoc.addEventListener('click', this.blockBackdropClick, { capture: true });
 		const toolbar = this.contentEl.createDiv({ cls: 'ai-rewrite-diff-toolbar' });
 		toolbar.createSpan({ cls: 'ai-rewrite-diff-hint', text: '确认前不会修改笔记；点“丢弃”将保留原文。' });
-		const toggle = toolbar.createDiv({ cls: 'ai-rewrite-diff-toggle' });
+		const toggle = toolbar.createDiv({ cls: 'ai-rewrite-diff-toggle', attr: { role: 'group', 'aria-label': '差异布局' } });
 		for (const [value, label] of LAYOUTS) {
-			const tab = toggle.createEl('button', { cls: 'ai-rewrite-diff-tab', text: label, attr: { type: 'button' } });
-			tab.toggleClass('is-active', value === this.layout);
+			const active = value === this.layout;
+			const tab = toggle.createEl('button', {
+				cls: 'ai-rewrite-diff-tab',
+				text: label,
+				attr: { type: 'button', 'aria-pressed': String(active), 'aria-label': `${label}差异视图` },
+			});
+			tab.toggleClass('is-active', active);
 			tab.addEventListener('click', () => this.setLayout(value));
 			this.tabs.set(value, tab);
 		}
 		const labels = this.contentEl.createDiv({ cls: 'ai-rewrite-diff-labels' });
 		labels.createSpan({ text: '原文' });
 		labels.createSpan({ text: this.original ? 'AI 结果' : '生成内容' });
-		this.viewEl = this.contentEl.createDiv({ cls: 'ai-rewrite-diff-view' });
+		this.viewEl = this.contentEl.createDiv({ cls: 'ai-rewrite-diff-view', attr: { role: 'region', 'aria-label': '改写差异内容' } });
 		this.mount();
 		new Setting(this.contentEl)
 			.addButton((button) => button.setButtonText('丢弃').onClick(() => this.dismiss()))
@@ -79,7 +84,11 @@ export class DiffModal extends Modal {
 		if (layout === this.layout) return;
 		this.layout = layout;
 		preferredLayout = layout;
-		for (const [value, tab] of this.tabs) tab.toggleClass('is-active', value === layout);
+		for (const [value, tab] of this.tabs) {
+			const active = value === layout;
+			tab.toggleClass('is-active', active);
+			tab.setAttribute('aria-pressed', String(active));
+		}
 		this.unmount();
 		this.mount();
 	}

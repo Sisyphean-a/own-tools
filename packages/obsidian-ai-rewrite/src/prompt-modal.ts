@@ -12,6 +12,9 @@ export class PromptModal extends Modal {
 	private imageList!: HTMLElement;
 	private images: string[] = [];
 	private pendingImages = 0;
+	private submitButton: HTMLButtonElement | null = null;
+	private imageStatus!: HTMLElement;
+	private validation!: HTMLElement;
 	private submitted = false;
 	private disposed = false;
 
@@ -32,6 +35,9 @@ export class PromptModal extends Modal {
 			cls: 'ai-rewrite-input',
 			attr: { placeholder: this.hasSelection ? '例如：改得更通顺一些' : '例如：总结这个链接 https://example.com/article', 'aria-label': '写作要求' },
 		});
+		this.validation = this.contentEl.createDiv({ cls: 'ai-rewrite-input-error', attr: { role: 'alert' } });
+		this.validation.hidden = true;
+		this.input.addEventListener('input', () => this.clearValidation());
 		this.input.addEventListener('keydown', (event) => {
 			if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
 				event.preventDefault();
@@ -40,13 +46,19 @@ export class PromptModal extends Modal {
 		});
 		this.input.addEventListener('paste', (event) => { void this.pasteImages(event); });
 		this.imageList = this.contentEl.createDiv({ cls: 'ai-rewrite-images' });
+		this.imageStatus = this.contentEl.createDiv({ cls: 'ai-rewrite-image-status', attr: { role: 'status', 'aria-live': 'polite' } });
+		this.imageStatus.hidden = true;
 		// Effect: 重开时恢复上次的指令和图片，失败后不用重新输入。
 		this.input.value = this.initial?.instruction ?? '';
 		this.images = [...(this.initial?.images ?? [])];
 		this.renderImages();
-		new Setting(this.contentEl).addButton((button) => {
-			button.setButtonText(this.hasSelection ? '生成改写' : '生成内容').setCta().onClick(() => this.submit());
-		});
+		new Setting(this.contentEl)
+			.addButton((button) => button.setButtonText('取消').onClick(() => this.close()))
+			.addButton((button) => {
+				this.submitButton = button.buttonEl;
+				button.setButtonText(this.hasSelection ? '生成改写' : '生成内容').setCta().onClick(() => this.submit());
+			});
+		this.updateImageStatus();
 		this.input.focus();
 	}
 
@@ -60,6 +72,7 @@ export class PromptModal extends Modal {
 		const pastedText = clipboard.getData('text/plain');
 		if (pastedText) this.input.setRangeText(pastedText, this.input.selectionStart, this.input.selectionEnd, 'end');
 		this.pendingImages++;
+		this.updateImageStatus();
 		try {
 			for (const file of files) {
 				const url = await readPastedImage(file);
@@ -74,7 +87,23 @@ export class PromptModal extends Modal {
 			if (!this.disposed) new Notice(error instanceof Error ? error.message : '图片读取失败');
 		} finally {
 			this.pendingImages--;
+			this.updateImageStatus();
 		}
+	}
+
+	private updateImageStatus(): void {
+		if (this.disposed || !this.imageStatus) return;
+		const pending = this.pendingImages > 0;
+		if (this.submitButton) this.submitButton.disabled = pending || this.submitted;
+		this.imageStatus.hidden = !pending;
+		this.imageStatus.textContent = pending ? '正在读取图片，请稍候…' : '';
+	}
+
+	private clearValidation(): void {
+		if (!this.validation) return;
+		this.validation.hidden = true;
+		this.validation.textContent = '';
+		this.input.removeAttribute('aria-invalid');
 	}
 
 	private renderImages(): void {
@@ -92,12 +121,21 @@ export class PromptModal extends Modal {
 
 	private submit(): void {
 		const instruction = this.input.value.trim();
-		if (!instruction || this.submitted) return;
+		if (this.submitted) return;
+		if (!instruction) {
+			this.validation.hidden = false;
+			this.validation.textContent = '请输入写作要求';
+			this.input.setAttribute('aria-invalid', 'true');
+			this.input.focus();
+			return;
+		}
 		if (this.pendingImages) {
 			new Notice('图片仍在读取，请稍候');
 			return;
 		}
+		this.clearValidation();
 		this.submitted = true;
+		if (this.submitButton) this.submitButton.disabled = true;
 		const images = [...this.images];
 		this.close();
 		this.submitPrompt(instruction, images);
@@ -105,6 +143,7 @@ export class PromptModal extends Modal {
 
 	onClose(): void {
 		this.disposed = true;
+		this.submitButton = null;
 		this.images = [];
 		this.contentEl.empty();
 		this.release(this.submitted);
