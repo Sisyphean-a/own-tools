@@ -245,6 +245,32 @@ test('generic style keeps shape rules but drops the density preferences', async 
 	assert.equal('styleSamples' in (JSON.parse(body.messages[1]!.content) as object), false);
 });
 
+test('history turns replay as conversation messages before the current request', async () => {
+	const sse = chunkEvent({ content: '又短又有结论' }, 'stop') + DONE;
+	let request: RequestInit | undefined;
+	await withFetch(async (_url, init) => {
+		request = init;
+		return stream([new TextEncoder().encode(sse)]);
+	}, async () => {
+		await streamRewrite(
+			settings,
+			'短版本',
+			{ before: '', after: '', history: [{ instruction: '先写短一点', result: '短版本' }] },
+			'再补一条结论',
+			[],
+			[],
+			createSink().sink,
+			new AbortController().signal,
+		);
+	});
+	const body = JSON.parse(request?.body as string) as { messages: { role: string; content: unknown }[] };
+	assert.deepEqual(body.messages.map((message) => message.role), ['system', 'user', 'assistant', 'user']);
+	assert.equal(body.messages[1]!.content, '先写短一点');
+	assert.equal(body.messages[2]!.content, '短版本');
+	assert.deepEqual(JSON.parse(body.messages[3]!.content as string), { instruction: '再补一条结论', selectedText: '短版本' });
+	assert.match(String(body.messages[0]!.content), /history/);
+});
+
 test('web pages travel with the request as reference material', async () => {
 	const sse = chunkEvent({ content: '结果' }, 'stop') + DONE;
 	let request: RequestInit | undefined;

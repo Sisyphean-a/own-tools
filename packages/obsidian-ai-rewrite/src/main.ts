@@ -1,7 +1,7 @@
 import { EditorView } from '@codemirror/view';
 import { Editor, FileSystemAdapter, MarkdownFileInfo, MarkdownView, Notice, Platform, Plugin, TFile, editorInfoField } from 'obsidian';
 import { streamRewrite, validateSettings, type RewriteRuntime } from './ai';
-import { STYLE_NEIGHBOR_LIMIT, buildContext, clipStyleSample, currentStyleSample, pickNeighborNotes, withStyleSamples } from './context';
+import { STYLE_NEIGHBOR_LIMIT, buildContext, clipStyleSample, currentStyleSample, pickNeighborNotes, withHistory, withStyleSamples, type RewriteTurn } from './context';
 import { DiffModal } from './diff-modal';
 import { createSelectionExtension, findEditorView } from './editor-views';
 import { PromptModal, type PromptDraft } from './prompt-modal';
@@ -19,7 +19,18 @@ interface RewriteSession {
 	info: MarkdownFileInfo;
 	original: string;
 	selection: SelectionPreview;
+	/** 同一目标已应用的轮次，继续对话时随请求发送。 */
+	turns: RewriteTurn[];
 	status: 'prompt' | 'stream' | 'review';
+}
+
+/** 应用后仍可继续的范围：内容被用户改动或切换文件后失效。 */
+interface Followup {
+	file: TFile;
+	from: number;
+	to: number;
+	text: string;
+	turns: RewriteTurn[];
 }
 
 export default class AiRewritePlugin extends Plugin {
@@ -28,6 +39,7 @@ export default class AiRewritePlugin extends Plugin {
 	private prompt: PromptModal | null = null;
 	private review: DiffModal | null = null;
 	private session: RewriteSession | null = null;
+	private followup: Followup | null = null;
 	private controller: AbortController | null = null;
 
 	async onload(): Promise<void> {
@@ -42,6 +54,15 @@ export default class AiRewritePlugin extends Plugin {
 			id: 'rewrite-selection',
 			name: '用 AI 改写或生成内容',
 			editorCallback: (editor: Editor, info: MarkdownFileInfo) => this.openPrompt(editor, info),
+		});
+		this.addCommand({
+			id: 'continue-rewrite',
+			name: '继续修改上一次 AI 结果',
+			editorCheckCallback: (checking, editor, info) => {
+				if (!this.canContinue(editor, info)) return false;
+				if (!checking) this.continueSession(editor, info);
+				return true;
+			},
 		});
 		this.addCommand({
 			id: 'cancel-rewrite',
@@ -66,11 +87,17 @@ export default class AiRewritePlugin extends Plugin {
 		this.registerEvent(this.app.workspace.on('editor-menu', (menu, editor, info) => {
 			menu.addItem((item) => item.setTitle('使用AI改写').setIcon('sparkles')
 				.onClick(() => this.openPrompt(editor, info)));
+			// Flow: 光标所在内容正好是上次应用的结果时，菜单里直接提供继续入口。
+			if (this.canContinue(editor, info)) {
+				menu.addItem((item) => item.setTitle('继续修改上一次 AI 结果').setIcon('history')
+					.onClick(() => this.continueSession(editor, info)));
+			}
 		}));
 		this.registerEvent(this.app.workspace.on('file-open', (file) => {
 			if (this.session && (file !== this.session.file || !this.valid(this.session))) {
 				this.cancel(this.session);
 			}
+			if (this.followup && file !== this.followup.file) this.followup = null;
 		}));
 	}
 
@@ -96,6 +123,8 @@ export default class AiRewritePlugin extends Plugin {
 			return;
 		}
 		const file = info.file;
+		// Rule: 开新会话即放弃上一次结果的继续入口，避免“继续”指向上一个目标。
+		this.followup = null;
 		const view = findEditorView(this.views, editor, info, this.app.workspace.getActiveViewOfType(MarkdownView));
 		if (!file || !view) {
 			new Notice('无法定位当前 Markdown 编辑器，请切换到编辑模式重试');
@@ -113,7 +142,7 @@ export default class AiRewritePlugin extends Plugin {
 			new Notice('选区与当前笔记不一致，请重新选择后重试');
 			return;
 		}
-		const session: RewriteSession = { editor, view, file, info, original, selection, status: 'prompt' };
+		const session: RewriteSession = { editor, view, file, info, original, selection, turns: [], status: 'prompt' };
 		this.session = session;
 		selection.setCancelHandler(() => this.cancel(session, '已取消生成'));
 		this.showPrompt(session, null);
@@ -121,7 +150,7 @@ export default class AiRewritePlugin extends Plugin {
 
 	/** Flow: 打开输入框；draft 非空时恢复上次的指令与图片（生成失败后重试）。 */
 	private showPrompt(session: RewriteSession, draft: PromptDraft | null): void {
-		const modal = new PromptModal(this.app, !!session.original, draft, (instruction, images) => {
+		const modal = new PromptModal(this.app, !!session.original, draft, this.historyHint(session), (instruction, images) => {
 			void this.submit(session, instruction, images);
 		}, (submitted) => {
 			if (this.prompt === modal) this.prompt = null;
@@ -176,7 +205,7 @@ export default class AiRewritePlugin extends Plugin {
 			const doc = session.view.state.doc.toString();
 			// Failure: 风格样本读取失败也走统一失败路径，回到输入框重试，正文不变。
 			const samples = await this.styleSamples(session, doc, range);
-			const context = withStyleSamples(buildContext(doc, range.from, range.to, this.settings.contextLimit), samples);
+			const context = withStyleSamples(withHistory(buildContext(doc, range.from, range.to, this.settings.contextLimit), session.turns), samples);
 			// Effect: 链接与检索进度写进预览卡片的过程面板；失败由外层统一取消并提示，原文不变。
 			const urls = extractUrls(instruction);
 			if (urls.length) pushProgress('links', `正在读取 ${urls.length} 个链接…`, false);
@@ -201,11 +230,21 @@ export default class AiRewritePlugin extends Plugin {
 			session.status = 'review';
 			const modal = new DiffModal(this.app, session.original, result, () => {
 				if (!this.valid(session)) throw new Error('文件已变化，请重新生成');
-				session.selection.apply(result);
+				const applied = session.selection.apply(result);
+				const turns = [...session.turns, { instruction, result }];
+				this.followup = { file: session.file, from: applied.from, to: applied.to, text: result, turns };
 				this.session = null;
+				// Effect: 应用后给出可点击的继续入口，避免用户以为只能重新生成。
+				this.notifyApplied(session);
 			}, () => {
 				if (this.review === modal) this.review = null;
 				if (this.session === session) this.cancel(session);
+			}, () => {
+				// Flow: 继续修改不写回笔记，保留锁定目标和已应用历史，回到输入框并预填上一轮指令。
+				this.review = null;
+				if (this.session !== session || !this.valid(session)) return;
+				session.status = 'prompt';
+				this.showPrompt(session, { instruction, images });
 			});
 			this.review = modal;
 			modal.open();
@@ -225,6 +264,60 @@ export default class AiRewritePlugin extends Plugin {
 		} finally {
 			if (flushFrame !== null) window.cancelAnimationFrame(flushFrame);
 		}
+	}
+
+	/** Flow: 显示已带上的历史轮数和上一条要求，让用户知道接着哪一轮说话。 */
+	private historyHint(session: RewriteSession): string | null {
+		const last = session.turns[session.turns.length - 1];
+		if (!last) return null;
+		const instruction = last.instruction.length > 80 ? `${last.instruction.slice(0, 80)}…` : last.instruction;
+		return `已带上 ${session.turns.length} 轮修改；上一条要求：${instruction}`;
+	}
+
+	/** Effect: 应用后提示可点击继续；点击时重新核对目标内容，已被改动就不再锁定。 */
+	private notifyApplied(session: RewriteSession): void {
+		const notice = new Notice('已应用。点击这里继续修改，会带上刚才的对话。', 8000);
+		// Rule: minAppVersion 为 1.1.0，只能用兼容旧版的 noticeEl；messageEl 需要 1.8.7。
+		notice.noticeEl.addClass('ai-rewrite-continue-notice');
+		notice.noticeEl.addEventListener('click', () => {
+			notice.hide();
+			if (this.canContinue(session.editor, session.info)) this.continueSession(session.editor, session.info);
+			else new Notice('结果已改动或已切换文件，无法继续上一次修改');
+		});
+	}
+
+	/** Rule: 只有目标内容仍与上次结果完全一致时才允许继续，用户已改动时不覆盖。 */
+	private canContinue(editor: Editor, info: MarkdownFileInfo): boolean {
+		const followup = this.followup;
+		if (!followup || this.session || info.file !== followup.file) return false;
+		return editor.getRange(editor.offsetToPos(followup.from), editor.offsetToPos(followup.to)) === followup.text;
+	}
+
+	private continueSession(editor: Editor, info: MarkdownFileInfo): void {
+		const followup = this.followup;
+		if (!followup) return;
+		const view = findEditorView(this.views, editor, info, this.app.workspace.getActiveViewOfType(MarkdownView));
+		const selection = view ? SelectionPreview.open(view, followup.from, followup.to, followup.text) : null;
+		if (!view || !selection) {
+			this.followup = null;
+			new Notice('结果内容已变化，无法继续上一次修改');
+			return;
+		}
+		this.followup = null;
+		view.dispatch({ selection: { anchor: followup.from, head: followup.to }, scrollIntoView: true });
+		const session: RewriteSession = {
+			editor,
+			view,
+			file: followup.file,
+			info,
+			original: followup.text,
+			selection,
+			turns: followup.turns,
+			status: 'prompt',
+		};
+		this.session = session;
+		selection.setCancelHandler(() => this.cancel(session, '已取消生成'));
+		this.showPrompt(session, null);
 	}
 
 	/** Flow: 收集风格样本：当前笔记去掉选区，加同目录最近几篇笔记的开头；用于让模型延续已有写法。 */
@@ -266,6 +359,7 @@ export default class AiRewritePlugin extends Plugin {
 
 	onunload(): void {
 		if (this.session) this.cancel(this.session);
+		this.followup = null;
 		this.views.clear();
 	}
 }

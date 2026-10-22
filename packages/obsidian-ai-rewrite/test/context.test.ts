@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildContext, clipStyleSample, currentStyleSample, pickNeighborNotes, withStyleSamples } from '../src/context';
+import { buildContext, clipStyleSample, clipTurns, currentStyleSample, pickNeighborNotes, withHistory, withStyleSamples } from '../src/context';
 
 test('短文返回完整前后文，选区内容不进入上下文，关闭时不发送', () => {
 	const doc = '前一段\n被选中的文字\n后一段';
@@ -82,4 +82,22 @@ test('样本并进上下文，没有样本时保持原上下文', () => {
 	assert.equal(withStyleSamples(context, []), context);
 	assert.deepEqual(withStyleSamples(null, ['样本']), { before: '', after: '', samples: ['样本'] });
 	assert.deepEqual(withStyleSamples(context, ['样本']), { ...context, samples: ['样本'] });
+});
+
+test('历史只保留最近几轮，并从最近一轮向前受字数上限约束', () => {
+	const turns = Array.from({ length: 7 }, (_, index) => ({ instruction: `要求${index}`, result: `结果${index}` }));
+	assert.deepEqual(clipTurns(turns).map((turn) => turn.instruction), ['要求2', '要求3', '要求4', '要求5', '要求6']);
+	const long = [
+		{ instruction: 'a'.repeat(10000), result: 'b'.repeat(10000) },
+		{ instruction: '短要求', result: '短结果' },
+	];
+	assert.deepEqual(clipTurns(long).map((turn) => turn.instruction), ['短要求']);
+});
+
+test('历史并进上下文，没有历史时保持原上下文', () => {
+	const context = { before: '前\n', after: '\n后' };
+	const turn = { instruction: '改短', result: '短版' };
+	assert.equal(withHistory(context, []), context);
+	assert.deepEqual(withHistory(null, [turn]), { before: '', after: '', history: [turn] });
+	assert.deepEqual(withHistory(context, [turn]), { ...context, history: [turn] });
 });

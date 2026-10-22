@@ -310,7 +310,10 @@ export class SelectionPreview {
 	start(): Pick<LockedRange, 'from' | 'to'> | null {
 		const range = this.view.state.field(lockedRange);
 		if (!range) return null;
-		this.view.dispatch({ effects: setLock.of({ ...range, phase: 'stream' }) });
+		// Rule: 同一目标开始新一轮时丢弃上一版预览，避免继续修改时新旧结果叠加。
+		this.preview = '';
+		this.thinkingBuffer = '';
+		this.view.dispatch({ effects: setLock.of({ ...range, phase: 'stream', preview: '' }) });
 		return { from: range.from, to: range.to };
 	}
 
@@ -366,9 +369,10 @@ export class SelectionPreview {
 		return true;
 	}
 
-	apply(result: string): void {
-		applyLocked(this.view, this.original, result);
+	apply(result: string): { from: number; to: number } {
+		const range = applyLocked(this.view, this.original, result);
 		cancelHandlers.delete(this.view);
+		return range;
 	}
 
 	private ensureLocked(): void {
@@ -393,11 +397,12 @@ export const selectionGuard: Extension = [
 	})),
 ];
 
-function applyLocked(view: EditorView, original: string, replacement: string): void {
+function applyLocked(view: EditorView, original: string, replacement: string): { from: number; to: number } {
 	const range = view.state.field(lockedRange);
 	if (!range || range.phase !== 'review' || view.state.doc.sliceString(range.from, range.to) !== original) {
 		throw new Error('原文或插入位置已变化，请重新生成');
 	}
+	const applied = { from: range.from, to: range.from + replacement.length };
 	view.dispatch({
 		changes: { from: range.from, to: range.to, insert: replacement },
 		selection: { anchor: range.from + replacement.length },
@@ -408,4 +413,5 @@ function applyLocked(view: EditorView, original: string, replacement: string): v
 		view.state.doc.sliceString(range.from, range.from + replacement.length) !== replacement) {
 		throw new Error('正文应用或预览清理未完成，请检查笔记内容并取消本次改写');
 	}
+	return applied;
 }

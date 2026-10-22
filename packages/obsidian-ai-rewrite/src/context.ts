@@ -1,9 +1,21 @@
+/** 同一目标已完成的修改轮次：用户要求与当时结果，用于继续对话。 */
+export interface RewriteTurn {
+	instruction: string;
+	result: string;
+}
+
 export interface RewriteContext {
 	before: string;
 	after: string;
 	/** 已有笔记正文样本，代表要延续的写法与排版；只学形态，不是改写对象。 */
 	samples?: string[];
+	/** 同一目标的先前轮次，按时间顺序；只用于理解迭代意图。 */
+	history?: RewriteTurn[];
 }
+
+/** Rule: 历史只保留最近几轮并限制总字数，避免多轮后请求无限膨胀。 */
+export const HISTORY_TURN_LIMIT = 5;
+export const HISTORY_CHARS_LIMIT = 16000;
 
 /** 风格样本额度：当前笔记取前 8000 字，同目录笔记每篇前 1500 字、最多 3 篇。 */
 export const STYLE_CURRENT_LIMIT = 8000;
@@ -56,7 +68,29 @@ export function pickNeighborNotes<T extends { path: string; stat: { mtime: numbe
 /** Flow: 把风格样本并进上下文；没有样本时保持原上下文不变。 */
 export function withStyleSamples(context: RewriteContext | null, samples: string[]): RewriteContext | null {
 	if (!samples.length) return context;
-	return { before: context?.before ?? '', after: context?.after ?? '', samples };
+	return { before: context?.before ?? '', after: context?.after ?? '', ...context, samples };
+}
+
+/** Flow: 取最近的几轮修改作为对话历史；从最近一轮向前累加，超出字数上限的旧轮丢弃。 */
+export function clipTurns(turns: readonly RewriteTurn[]): RewriteTurn[] {
+	const kept: RewriteTurn[] = [];
+	let budget = HISTORY_CHARS_LIMIT;
+	for (let index = turns.length - 1; index >= 0 && kept.length < HISTORY_TURN_LIMIT; index -= 1) {
+		const turn = turns[index];
+		if (!turn) continue;
+		const cost = turn.instruction.length + turn.result.length;
+		if (kept.length && cost > budget) break;
+		kept.unshift(turn);
+		budget -= cost;
+	}
+	return kept;
+}
+
+/** Flow: 把修改轮次并进上下文；没有历史时保持原上下文不变。 */
+export function withHistory(context: RewriteContext | null, turns: readonly RewriteTurn[]): RewriteContext | null {
+	const history = clipTurns(turns);
+	if (!history.length) return context;
+	return { before: context?.before ?? '', after: context?.after ?? '', ...context, history };
 }
 
 function takeEnd(source: string, budget: number): { text: string; truncated: boolean } {

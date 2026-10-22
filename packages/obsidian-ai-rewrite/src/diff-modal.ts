@@ -14,8 +14,17 @@ export class DiffModal extends Modal {
 	private diffView: { destroy(): void } | null = null;
 	private layout: DiffLayout = preferredLayout;
 	private tabs = new Map<DiffLayout, HTMLButtonElement>();
+	/** Rule: 继续修改时保持选区锁定和会话，关闭确认框不释放。 */
+	private keepSession = false;
 
-	constructor(app: App, private original: string, private result: string, private apply: () => void, private release: () => void) {
+	constructor(
+		app: App,
+		private original: string,
+		private result: string,
+		private apply: () => void,
+		private release: () => void,
+		private continueEditing: () => void,
+	) {
 		super(app);
 	}
 
@@ -59,6 +68,11 @@ export class DiffModal extends Modal {
 			.addButton((button) => button.setButtonText('复制结果').onClick(() => {
 				void navigator.clipboard.writeText(this.result).then(() => new Notice('已复制结果'), () => new Notice('复制失败'));
 			}))
+			.addButton((button) => button.setButtonText('继续修改').onClick(() => {
+				this.keepSession = true;
+				this.dismiss();
+				this.continueEditing();
+			}))
 			.addButton((button) => button.setButtonText(this.original ? '应用改写' : '插入内容').setCta().onClick(() => {
 				try {
 					this.apply();
@@ -76,7 +90,7 @@ export class DiffModal extends Modal {
 		this.viewEl = null;
 		this.tabs.clear();
 		this.contentEl.empty();
-		this.release();
+		if (!this.keepSession) this.release();
 	}
 
 	/** Effect: 切换视图时重建差异视图；选择结果在本次会话内保留。 */

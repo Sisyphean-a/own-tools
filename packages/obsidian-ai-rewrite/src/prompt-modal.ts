@@ -22,6 +22,7 @@ export class PromptModal extends Modal {
 		app: App,
 		private hasSelection: boolean,
 		private initial: PromptDraft | null,
+		private hint: string | null,
 		private submitPrompt: (instruction: string, images: string[]) => void,
 		private release: (submitted: boolean) => void,
 	) {
@@ -31,6 +32,8 @@ export class PromptModal extends Modal {
 	onOpen(): void {
 		this.titleEl.setText(this.hasSelection ? '改写选中文字' : '在光标处生成内容');
 		this.contentEl.createEl('p', { text: '输入要求，可粘贴图片作为参考；指令中的链接会先读取网页正文，开启联网搜索后模型可自行检索网页。Enter 提交，Shift + Enter 换行。' });
+		// Effect: 继续修改时显示上一轮要求，让用户知道自己接着哪一轮说话。
+		if (this.hint) this.contentEl.createEl('p', { cls: 'ai-rewrite-history-hint', text: this.hint });
 		this.input = this.contentEl.createEl('textarea', {
 			cls: 'ai-rewrite-input',
 			attr: { placeholder: this.hasSelection ? '例如：改得更通顺一些' : '例如：总结这个链接 https://example.com/article', 'aria-label': '写作要求' },

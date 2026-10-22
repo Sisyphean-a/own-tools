@@ -205,6 +205,14 @@
   resize: vertical;
 }
 
+/* Rule: 继续修改时显示上一条要求，弱化显示，不干扰输入。 */
+.ai-rewrite-history-hint {
+  margin: 0 0 0.4rem;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow-wrap: anywhere;
+}
+
 .ai-rewrite-input-error,
 .ai-rewrite-image-status {
   margin-top: 0.35rem;
@@ -432,4 +440,9 @@
   .ai-rewrite-spinner { animation: none; }
   .ai-rewrite-process-panel,
   .ai-rewrite-process-arrow { transition: none; }
+}
+
+/* Rule: 应用后的提示可点击继续修改，给出明确的手型提示。 */
+.ai-rewrite-continue-notice {
+  cursor: pointer;
 }

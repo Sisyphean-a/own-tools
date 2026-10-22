@@ -45,13 +45,27 @@ test('selected source remains unchanged while chunks stream and user edits insid
 	assert.equal(view.state.field(lockedRange), null);
 });
 
+test('starting another round clears the previous preview before streaming', () => {
+	const view = holder();
+	view.selection.start();
+	view.selection.appendText('旧结果');
+	view.selection.flush();
+	view.selection.complete('旧结果');
+	assert.equal(view.state.field(lockedRange)?.preview, '旧结果');
+	// Flow: 确认框里“继续修改”后再生成，预览不能拼上上一版。
+	view.selection.start();
+	view.selection.appendText('新');
+	view.selection.flush();
+	assert.equal(view.state.field(lockedRange)?.preview, '新');
+});
+
 test('confirmation applies exactly once and one undo restores source, preserving outside edits', () => {
 	const view = holder();
 	view.dispatch({ changes: { from: 0, insert: 'ok ' } });
 	assert.deepEqual(view.state.field(lockedRange), { from: 7, to: 13, phase: 'prompt', preview: '' });
 	view.selection.start();
 	view.selection.complete('新内容');
-	view.selection.apply('新内容');
+	assert.deepEqual(view.selection.apply('新内容'), { from: 7, to: 10 });
 	assert.equal(view.state.doc.toString(), 'ok abc 新内容 xyz');
 	assert.equal(view.state.field(lockedRange), null);
 	assert.equal(undo(view as unknown as EditorView), true);
