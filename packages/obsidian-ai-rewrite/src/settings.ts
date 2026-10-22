@@ -4,6 +4,8 @@ import { DEFAULT_SEARCH_ENDPOINT } from './search';
 import type AiRewritePlugin from './main';
 
 export type ReasoningEffort = 'default' | 'none' | 'low' | 'high' | 'max';
+export type StylePreset = 'concise' | 'generic';
+export type StyleScope = 'note' | 'note-folder' | 'off';
 
 export interface AiSettings {
 	endpoint: string;
@@ -18,6 +20,10 @@ export interface AiSettings {
 	searchApiKey: string;
 	/** 文件读取范围：off 不提供工具，vault 仅笔记库，any 允许任意本地路径；仅桌面版生效。 */
 	fileReadScope: FileReadScope;
+	/** 写作风格：concise 信息密度优先并少用装饰；generic 只沿用笔记已有形态。 */
+	stylePreset: StylePreset;
+	/** 风格样本范围：note 仅当前笔记，note-folder 再加同目录笔记，off 不发送。 */
+	styleScope: StyleScope;
 }
 
 export const CONTEXT_LIMIT_OPTIONS: readonly number[] = [0, 1000, 2000, 4000, 8000, 16000];
@@ -32,8 +38,12 @@ export const DEFAULT_SETTINGS: AiSettings = {
 	searchEndpoint: DEFAULT_SEARCH_ENDPOINT,
 	searchApiKey: '',
 	fileReadScope: 'off',
+	stylePreset: 'concise',
+	styleScope: 'note',
 };
 export const FILE_READ_SCOPE_OPTIONS: readonly FileReadScope[] = ['off', 'vault', 'any'];
+export const STYLE_PRESET_OPTIONS: readonly StylePreset[] = ['concise', 'generic'];
+export const STYLE_SCOPE_OPTIONS: readonly StyleScope[] = ['note', 'note-folder', 'off'];
 
 export function normalizeFileReadScope(value: unknown): FileReadScope {
 	return typeof value === 'string' && FILE_READ_SCOPE_OPTIONS.includes(value as FileReadScope)
@@ -45,6 +55,18 @@ export function normalizeContextLimit(value: unknown): number {
 	return typeof value === 'number' && CONTEXT_LIMIT_OPTIONS.includes(value)
 		? value
 		: DEFAULT_SETTINGS.contextLimit;
+}
+
+export function normalizeStylePreset(value: unknown): StylePreset {
+	return typeof value === 'string' && STYLE_PRESET_OPTIONS.includes(value as StylePreset)
+		? value as StylePreset
+		: DEFAULT_SETTINGS.stylePreset;
+}
+
+export function normalizeStyleScope(value: unknown): StyleScope {
+	return typeof value === 'string' && STYLE_SCOPE_OPTIONS.includes(value as StyleScope)
+		? value as StyleScope
+		: DEFAULT_SETTINGS.styleScope;
 }
 
 export class AiSettingTab extends PluginSettingTab {
@@ -84,6 +106,26 @@ export class AiSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					if (value !== 'default' && value !== 'none' && value !== 'low' && value !== 'high' && value !== 'max') return;
 					this.plugin.settings.reasoningEffort = value;
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName('写作风格')
+			.setDesc('简洁：信息密度优先，少用加粗、引用块、分隔线、emoji 和大表格；宽松：只延续笔记已有形态。生成新内容不产出大标题，小标题层级和写法跟随笔记；改写时保留原层级。')
+			.addDropdown((dropdown) => dropdown
+				.addOptions({ concise: '简洁（默认）', generic: '宽松' })
+				.setValue(normalizeStylePreset(this.plugin.settings.stylePreset))
+				.onChange(async (value) => {
+					this.plugin.settings.stylePreset = normalizeStylePreset(value);
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName('风格参考')
+			.setDesc('把已有笔记正文作为形态样本发送，让生成结果延续你原来的写法。仅当前笔记最省；新建文档可用“当前笔记 + 同目录”，参考同目录最近 3 篇。样本会上传给 AI 服务。')
+			.addDropdown((dropdown) => dropdown
+				.addOptions({ note: '仅当前笔记（默认）', 'note-folder': '当前笔记 + 同目录', off: '不使用' })
+				.setValue(normalizeStyleScope(this.plugin.settings.styleScope))
+				.onChange(async (value) => {
+					this.plugin.settings.styleScope = normalizeStyleScope(value);
 					await this.plugin.saveSettings();
 				}));
 		new Setting(containerEl)
@@ -149,6 +191,6 @@ export class AiSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 			});
-		new Setting(containerEl).setName('隐私').setDesc('提交后将指令、选中文字、选区（或光标）前后受上限约束的上下文、主动粘贴的图片及指令中链接的网页正文（最多 3 个，超限截断）发送到配置的服务；开启联网搜索时，模型会向搜索服务发送查询词并把检索结果一并交给模型；开启文件读取时，模型读取到的文件内容同样会随请求发送。不会发送整篇笔记或文件名。');
+		new Setting(containerEl).setName('隐私').setDesc('提交后将指令、选中文字、选区（或光标）前后受上限约束的上下文、风格样本（当前笔记去掉选区的正文，最多 8000 字；选择同目录时再加最近 3 篇、每篇最多 1500 字）、主动粘贴的图片及指令中链接的网页正文（最多 3 个，超限截断）发送到配置的服务；开启联网搜索时，模型会向搜索服务发送查询词并把检索结果一并交给模型；开启文件读取时，模型读取到的文件内容同样会随请求发送。不会发送文件名。');
 	}
 }

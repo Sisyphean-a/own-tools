@@ -111,6 +111,8 @@ test('explicit thinking levels are sent as documented, without changing the defa
 		searchEndpoint: 'https://api.tavily.com/search',
 		searchApiKey: '',
 		fileReadScope: 'off',
+		stylePreset: 'concise',
+		styleScope: 'note',
 	});
 });
 
@@ -199,6 +201,48 @@ test('context travels with the request without repeating the selection', async (
 	});
 	const body = JSON.parse(empty?.body as string) as { messages: { content: string }[] };
 	assert.deepEqual(JSON.parse(body.messages[1]!.content), { instruction: '写一句', selectedText: '' });
+});
+
+test('style samples and shape rules travel by default, and concise drops decoration', async () => {
+	const sse = chunkEvent({ content: '## 接口\n- 入参 `id`' }, 'stop') + DONE;
+	let request: RequestInit | undefined;
+	await withFetch(async (_url, init) => {
+		request = init;
+		return stream([new TextEncoder().encode(sse)]);
+	}, async () => {
+		await streamRewrite(settings, '', { before: '', after: '', samples: ['## 1. 包身份\n1. 应用名改成 `LuckyCrédito`'] }, '补一段接口说明', [], [], createSink().sink, new AbortController().signal);
+	});
+	const body = JSON.parse(request?.body as string) as { messages: { content: string }[] };
+	assert.deepEqual(JSON.parse(body.messages[1]!.content), {
+		instruction: '补一段接口说明',
+		selectedText: '',
+		styleSamples: ['## 1. 包身份\n1. 应用名改成 `LuckyCrédito`'],
+	});
+	const system = body.messages[0]!.content;
+	assert.match(system, /styleSamples/);
+	assert.match(system, /不输出 `#` 一级标题/);
+	assert.match(system, /优先已有形态/);
+	assert.match(system, /信息密度优先/);
+	assert.match(system, /不用加粗/);
+	assert.match(validateSettings({ ...settings, stylePreset: 'bad' as 'concise' }) ?? '', /写作风格/);
+	assert.match(validateSettings({ ...settings, styleScope: 'bad' as 'note' }) ?? '', /风格参考范围/);
+});
+
+test('generic style keeps shape rules but drops the density preferences', async () => {
+	const sse = chunkEvent({ content: '## 小节\n正文' }, 'stop') + DONE;
+	let request: RequestInit | undefined;
+	await withFetch(async (_url, init) => {
+		request = init;
+		return stream([new TextEncoder().encode(sse)]);
+	}, async () => {
+		await streamRewrite({ ...settings, stylePreset: 'generic' }, '', null, '补一段说明', [], [], createSink().sink, new AbortController().signal);
+	});
+	const body = JSON.parse(request?.body as string) as { messages: { content: string }[] };
+	const system = body.messages[0]!.content;
+	assert.match(system, /不输出 `#` 一级标题/);
+	assert.match(system, /优先已有形态/);
+	assert.equal(system.includes('信息密度优先'), false);
+	assert.equal('styleSamples' in (JSON.parse(body.messages[1]!.content) as object), false);
 });
 
 test('web pages travel with the request as reference material', async () => {

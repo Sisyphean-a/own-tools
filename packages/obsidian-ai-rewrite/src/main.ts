@@ -1,12 +1,12 @@
 import { EditorView } from '@codemirror/view';
 import { Editor, FileSystemAdapter, MarkdownFileInfo, MarkdownView, Notice, Platform, Plugin, TFile, editorInfoField } from 'obsidian';
 import { streamRewrite, validateSettings, type RewriteRuntime } from './ai';
-import { buildContext } from './context';
+import { STYLE_NEIGHBOR_LIMIT, buildContext, clipStyleSample, currentStyleSample, pickNeighborNotes, withStyleSamples } from './context';
 import { DiffModal } from './diff-modal';
 import { createSelectionExtension, findEditorView } from './editor-views';
 import { PromptModal, type PromptDraft } from './prompt-modal';
 import { SelectionPreview } from './selection-lock';
-import { AiSettingTab, DEFAULT_SETTINGS, normalizeContextLimit, normalizeFileReadScope, type AiSettings } from './settings';
+import { AiSettingTab, DEFAULT_SETTINGS, normalizeContextLimit, normalizeFileReadScope, normalizeStylePreset, normalizeStyleScope, type AiSettings } from './settings';
 import { extractUrls, readWebPages } from './web';
 
 /** Rule: 流式更新按帧调度，但至少间隔该毫秒数才真正合并一次，避免每帧都触发编辑器重排。 */
@@ -34,6 +34,8 @@ export default class AiRewritePlugin extends Plugin {
 		this.settings = { ...DEFAULT_SETTINGS, ...await this.loadData() as Partial<AiSettings> };
 		this.settings.contextLimit = normalizeContextLimit(this.settings.contextLimit);
 		this.settings.fileReadScope = normalizeFileReadScope(this.settings.fileReadScope);
+		this.settings.stylePreset = normalizeStylePreset(this.settings.stylePreset);
+		this.settings.styleScope = normalizeStyleScope(this.settings.styleScope);
 		this.registerEditorExtension(createSelectionExtension(this.views));
 		this.addSettingTab(new AiSettingTab(this.app, this));
 		this.addCommand({
@@ -142,8 +144,6 @@ export default class AiRewritePlugin extends Plugin {
 		}
 		const controller = new AbortController();
 		this.controller = controller;
-		// Rule: 上下文在提交时从当前文档取，只用于理解语境，不扩大锁定与写回范围。
-		const context = buildContext(session.view.state.doc.toString(), range.from, range.to, this.settings.contextLimit);
 		let flushFrame: number | null = null;
 		let lastFlushAt = 0;
 		// Effect: 用 requestAnimationFrame 按帧调度（后台标签页不空转），并保证最小间隔；思考与正文合并成一次事务。
@@ -172,6 +172,11 @@ export default class AiRewritePlugin extends Plugin {
 			if (this.valid(session)) session.selection.progress(id, text, done);
 		};
 		try {
+			// Rule: 上下文在提交时从当前文档取，只用于理解语境，不扩大锁定与写回范围。
+			const doc = session.view.state.doc.toString();
+			// Failure: 风格样本读取失败也走统一失败路径，回到输入框重试，正文不变。
+			const samples = await this.styleSamples(session, doc, range);
+			const context = withStyleSamples(buildContext(doc, range.from, range.to, this.settings.contextLimit), samples);
 			// Effect: 链接与检索进度写进预览卡片的过程面板；失败由外层统一取消并提示，原文不变。
 			const urls = extractUrls(instruction);
 			if (urls.length) pushProgress('links', `正在读取 ${urls.length} 个链接…`, false);
@@ -220,6 +225,20 @@ export default class AiRewritePlugin extends Plugin {
 		} finally {
 			if (flushFrame !== null) window.cancelAnimationFrame(flushFrame);
 		}
+	}
+
+	/** Flow: 收集风格样本：当前笔记去掉选区，加同目录最近几篇笔记的开头；用于让模型延续已有写法。 */
+	private async styleSamples(session: RewriteSession, doc: string, range: { from: number; to: number }): Promise<string[]> {
+		if (this.settings.styleScope === 'off') return [];
+		const samples: string[] = [];
+		const current = currentStyleSample(doc, range.from, range.to);
+		if (current) samples.push(current);
+		if (this.settings.styleScope !== 'note-folder') return samples;
+		for (const file of pickNeighborNotes(this.app.vault.getMarkdownFiles(), session.file.path)) {
+			const neighbor = clipStyleSample(await this.app.vault.cachedRead(file), STYLE_NEIGHBOR_LIMIT);
+			if (neighbor) samples.push(neighbor);
+		}
+		return samples;
 	}
 
 	/** Flow: 组合文件读取需要的运行环境；手机版或非文件系统适配器时不可用。 */
