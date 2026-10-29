@@ -1,15 +1,10 @@
 import { requestUrl, type RequestUrlResponse } from 'obsidian';
 
-export const DEFAULT_SEARCH_ENDPOINT = 'https://api.tavily.com/search';
+export const DEFAULT_SEARCH_ENDPOINT = 'https://api.deepseek.com/v1/tools/search';
 export const SEARCH_TOOL_NAME = 'web_search';
-
-export type SearchTopic = 'general' | 'news' | 'finance';
-export type SearchTimeRange = 'day' | 'week' | 'month' | 'year';
 
 export interface SearchRequest {
 	query: string;
-	topic: SearchTopic;
-	timeRange?: SearchTimeRange;
 }
 
 export interface SearchResult {
@@ -31,27 +26,21 @@ export interface SearchOptions {
 	signal: AbortSignal;
 }
 
-/** Rule: 工具参数与 dsChat 的 tavily_search 保持一致（query/topic/timeRange），便于两个项目迁移与对照。 */
 export const WEB_SEARCH_TOOL = {
 	type: 'function',
 	function: {
 		name: SEARCH_TOOL_NAME,
-		description: '联网检索公开网页。需要最新信息、外部事实或用户要求联网时调用；时效性问题用 timeRange 限定时间，新闻用 topic=news。',
+		description: '联网检索公开网页。需要最新信息、外部事实或用户要求联网时调用；时效性问题在 query 中使用 after:YYYY-MM-DD 或 before:YYYY-MM-DD 限定日期。',
 		parameters: {
 			type: 'object',
 			properties: {
-				query: { type: 'string', description: '要搜索的问题或关键词。' },
-				topic: { type: 'string', enum: ['general', 'news', 'finance'], description: '搜索主题，默认 general。' },
-				timeRange: { type: 'string', enum: ['day', 'week', 'month', 'year'], description: '按发布日期过滤的时间范围。' },
+				query: { type: 'string', description: '搜索词，最多 128 个字符；支持 site:、lang:、after: 和 before: 等搜索语法。' },
 			},
 			required: ['query'],
 			additionalProperties: false,
 		},
 	},
 } as const;
-
-const TOPICS: readonly SearchTopic[] = ['general', 'news', 'finance'];
-const TIME_RANGES: readonly SearchTimeRange[] = ['day', 'week', 'month', 'year'];
 
 /** Flow: 校验模型给出的工具参数。 */
 export function parseSearchArgs(argumentsJson: string): SearchRequest {
@@ -62,29 +51,17 @@ export function parseSearchArgs(argumentsJson: string): SearchRequest {
 		throw new Error('联网搜索参数不是有效 JSON');
 	}
 	if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('联网搜索参数必须是对象');
-	const { query, topic, timeRange } = parsed as { query?: unknown; topic?: unknown; timeRange?: unknown };
+	const { query } = parsed as { query?: unknown };
 	if (typeof query !== 'string' || !query.trim()) throw new Error('联网搜索缺少查询词');
-	if (topic !== undefined && !TOPICS.includes(topic as SearchTopic)) throw new Error('联网搜索主题无效，只支持 general/news/finance');
-	if (timeRange !== undefined && !TIME_RANGES.includes(timeRange as SearchTimeRange)) {
-		throw new Error('联网搜索时间范围无效，只支持 day/week/month/year');
-	}
-	return {
-		query: query.trim(),
-		topic: (topic as SearchTopic | undefined) ?? 'general',
-		...(timeRange ? { timeRange: timeRange as SearchTimeRange } : {}),
-	};
+	if (Array.from(query.trim()).length > 128) throw new Error('联网搜索查询词不能超过 128 个字符');
+	return { query: query.trim() };
 }
 
 export async function searchWeb(request: SearchRequest, options: SearchOptions): Promise<SearchResponse> {
 	const body = JSON.stringify({
 		query: request.query,
-		search_depth: 'basic',
-		max_results: 5,
-		include_answer: false,
-		include_raw_content: false,
-		include_published_date: true,
-		topic: request.topic,
-		...(request.timeRange ? { time_range: request.timeRange } : {}),
+		count: 5,
+		need_content: false,
 	});
 	let response: RequestUrlResponse;
 	try {
@@ -115,34 +92,35 @@ export async function searchWeb(request: SearchRequest, options: SearchOptions):
 
 function compactSearchResponse(query: string, payload: unknown): SearchResponse {
 	if (typeof payload !== 'object' || payload === null) throw new Error('联网搜索返回了无效数据');
-	const raw = payload as { query?: unknown; results?: unknown };
-	const items = Array.isArray(raw.results) ? raw.results : [];
+	const raw = payload as { results?: unknown };
+	if (!Array.isArray(raw.results)) throw new Error('联网搜索返回了无效数据');
+	const items = raw.results;
 	const results: SearchResult[] = [];
 	for (const item of items) {
 		if (typeof item !== 'object' || item === null) continue;
-		const value = item as { title?: unknown; url?: unknown; content?: unknown; score?: unknown; published_date?: unknown };
+		const value = item as { title?: unknown; url?: unknown; summary?: unknown; snippet?: unknown; rerank_score?: unknown; date?: unknown };
 		const url = typeof value.url === 'string' ? value.url.trim() : '';
 		if (!url) continue;
-		const publishedDate = typeof value.published_date === 'string' ? value.published_date.trim() : '';
+		const publishedDate = typeof value.date === 'string' ? value.date.trim() : '';
 		results.push({
 			title: typeof value.title === 'string' ? value.title.trim() : '',
 			url,
-			content: typeof value.content === 'string' ? value.content.trim() : '',
-			score: typeof value.score === 'number' ? value.score : 0,
+			content: typeof value.summary === 'string' && value.summary.trim() ? value.summary.trim() : typeof value.snippet === 'string' ? value.snippet.trim() : '',
+			score: typeof value.rerank_score === 'number' ? value.rerank_score : 0,
 			...(publishedDate ? { publishedDate } : {}),
 		});
 	}
-	return { query: typeof raw.query === 'string' && raw.query.trim() ? raw.query.trim() : query, results };
+	return { query, results };
 }
 
-/** Flow: 尽量取出 Tavily 的错误说明；正文不是 JSON 时只保留状态码。 */
+/** Flow: 尽量取出搜索服务的错误说明；正文不是 JSON 时只保留状态码。 */
 function errorDetail(text: string): string {
 	try {
 		const payload = JSON.parse(text) as { detail?: unknown; error?: unknown };
 		const detail = payload.detail ?? payload.error;
 		if (typeof detail === 'string') return detail.trim().slice(0, 200);
-		if (typeof detail === 'object' && detail !== null && 'error' in detail && typeof detail.error === 'string') {
-			return detail.error.trim().slice(0, 200);
+		if (typeof detail === 'object' && detail !== null && 'message' in detail && typeof detail.message === 'string') {
+			return detail.message.trim().slice(0, 200);
 		}
 	} catch {
 		// Failure: 错误正文无法解析时忽略。

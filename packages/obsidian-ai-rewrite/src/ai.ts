@@ -78,8 +78,7 @@ export function validateSettings(settings: AiSettings): string | null {
 	if (!STYLE_PRESET_OPTIONS.includes(settings.stylePreset)) return '请在设置中选择有效的写作风格';
 	if (!STYLE_SCOPE_OPTIONS.includes(settings.styleScope)) return '请在设置中选择有效的风格参考范围';
 	if (settings.searchEnabled) {
-		if (!settings.searchApiKey.trim()) return '请在设置中填写搜索 API 密钥，或关闭联网搜索';
-		const searchProblem = endpointError(settings.searchEndpoint, '联网搜索接口');
+		const searchProblem = endpointError(settings.deepSeekSearchEndpoint, '联网搜索接口');
 		if (searchProblem) return searchProblem;
 	}
 	return null;
@@ -193,8 +192,8 @@ async function runTool(call: ToolCall, settings: AiSettings, runtime: RewriteRun
 		const request = parseSearchArgs(call.arguments);
 		sink.progress(call.id, `正在联网检索：${request.query}`, false);
 		const result = await searchWeb(request, {
-			apiKey: settings.searchApiKey,
-			endpoint: settings.searchEndpoint,
+			apiKey: settings.deepSeekSearchApiKey.trim() || settings.apiKey.trim(),
+			endpoint: settings.deepSeekSearchEndpoint,
 			signal,
 		});
 		sink.progress(call.id, `联网检索完成，返回 ${result.results.length} 条结果`, true);

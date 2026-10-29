@@ -12,7 +12,7 @@ import { setRequestUrlHandler, type RequestUrlHandler, type RequestUrlResponse }
 Object.assign(globalThis, { window: { require: createRequire(import.meta.url), setInterval, clearInterval, setTimeout, clearTimeout } });
 
 const settings = { ...DEFAULT_SETTINGS, apiKey: 'secret' };
-const searchSettings = { ...settings, searchEnabled: true, searchApiKey: 'tvly-key' };
+const searchSettings = { ...settings, searchEnabled: true, deepSeekSearchApiKey: 'search-key' };
 
 function stream(parts: Uint8Array[]): Response {
 	return new Response(new ReadableStream({
@@ -102,14 +102,17 @@ test('explicit thinking levels are sent as documented, without changing the defa
 		assert.equal(JSON.parse(request?.body as string).reasoning_effort, effort);
 	}
 	assert.match(validateSettings({ ...settings, reasoningEffort: 'invalid' as 'low' }) ?? '', /思考等级/);
+	const legacySearch = { ...DEFAULT_SETTINGS, ...{ searchEndpoint: 'https://api.tavily.com/search', searchApiKey: 'old-search-key', searchEnabled: true } };
+	assert.equal(legacySearch.deepSeekSearchEndpoint, 'https://api.deepseek.com/v1/tools/search');
+	assert.equal(legacySearch.deepSeekSearchApiKey, '');
 	const savedBeforeUpgrade = { endpoint: 'https://example.com/v1/chat/completions', model: 'other-model', apiKey: 'old-key' };
 	assert.deepEqual({ ...DEFAULT_SETTINGS, ...savedBeforeUpgrade }, {
 		...savedBeforeUpgrade,
 		reasoningEffort: 'default',
 		contextLimit: 4000,
 		searchEnabled: false,
-		searchEndpoint: 'https://api.tavily.com/search',
-		searchApiKey: '',
+		deepSeekSearchEndpoint: 'https://api.deepseek.com/v1/tools/search',
+		deepSeekSearchApiKey: '',
 		fileReadScope: 'off',
 		stylePreset: 'concise',
 		styleScope: 'note',
@@ -294,7 +297,7 @@ test('web_search tool calls run between rounds and reasoning stays out of the re
 	const first = [
 		chunkEvent({ content: '我先查一下。', reasoning_content: '需要联网' }),
 		chunkEvent({ tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'web_search', arguments: '{"query":"今日新' } }] }),
-		chunkEvent({ tool_calls: [{ index: 0, function: { arguments: '闻","topic":"news","timeRange":"day"}' } }] }, 'tool_calls'),
+		chunkEvent({ tool_calls: [{ index: 0, function: { arguments: '闻 after:2026-09-28"}' } }] }, 'tool_calls'),
 		DONE,
 	].join('');
 	const second = chunkEvent({ content: '今天的主要新闻是…' }, 'stop') + DONE;
@@ -304,17 +307,11 @@ test('web_search tool calls run between rounds and reasoning stays out of the re
 		return stream([new TextEncoder().encode(requests.length === 1 ? first : second)]);
 	}, async () => {
 		await withRequestUrl(async (param) => {
-			assert.equal(param.url, 'https://api.tavily.com/search');
+			assert.equal(param.url, 'https://api.deepseek.com/v1/tools/search');
 			assert.equal(param.method, 'POST');
-			assert.equal(param.headers?.Authorization, 'Bearer tvly-key');
-			const body = JSON.parse(param.body as string) as { query: string; topic: string; time_range: string; search_depth: string };
-			assert.deepEqual({ query: body.query, topic: body.topic, time_range: body.time_range, search_depth: body.search_depth }, {
-				query: '今日新闻',
-				topic: 'news',
-				time_range: 'day',
-				search_depth: 'basic',
-			});
-			return searchResponse([{ title: '新闻标题', url: 'https://news.example/1', content: '摘要', score: 0.9 }]);
+			assert.equal(param.headers?.Authorization, 'Bearer search-key');
+			assert.deepEqual(JSON.parse(param.body as string), { query: '今日新闻 after:2026-09-28', count: 5, need_content: false });
+			return searchResponse([{ title: '新闻标题', url: 'https://news.example/1', summary: '摘要', rerank_score: 2.4 }]);
 		}, async () => {
 			const { sink, chunks, reasoning, progress, resets } = createSink();
 			const result = await streamRewrite(searchSettings, '', null, '整理今天的新闻', [], [], sink, new AbortController().signal);
@@ -322,7 +319,7 @@ test('web_search tool calls run between rounds and reasoning stays out of the re
 			assert.deepEqual(chunks, ['今天的主要新闻是…']);
 			assert.deepEqual(reasoning, ['需要联网']);
 			assert.deepEqual(progress, [
-				{ id: 'call_1', text: '正在联网检索：今日新闻', done: false },
+				{ id: 'call_1', text: '正在联网检索：今日新闻 after:2026-09-28', done: false },
 				{ id: 'call_1', text: '联网检索完成，返回 1 条结果', done: true },
 			]);
 			assert.equal(resets(), 1);
@@ -339,7 +336,7 @@ test('web_search tool calls run between rounds and reasoning stays out of the re
 	assert.deepEqual(body.messages[2]!.tool_calls, [{
 		id: 'call_1',
 		type: 'function',
-		function: { name: 'web_search', arguments: '{"query":"今日新闻","topic":"news","timeRange":"day"}' },
+		function: { name: 'web_search', arguments: '{"query":"今日新闻 after:2026-09-28"}' },
 	}]);
 	assert.equal(body.messages[3]!.tool_call_id, 'call_1');
 	assert.match(String(body.messages[3]!.content), /https:\/\/news\.example\/1/);
@@ -351,13 +348,26 @@ test('web_search tool calls run between rounds and reasoning stays out of the re
 	);
 });
 
+test('search uses the main API key when the optional search key is blank', async () => {
+	const first = chunkEvent({ tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'web_search', arguments: '{"query":"x"}' } }] }, 'tool_calls') + DONE;
+	let calls = 0;
+	await withFetch(async () => stream([new TextEncoder().encode(++calls === 1 ? first : chunkEvent({ content: '完成' }, 'stop') + DONE)]), async () => {
+		await withRequestUrl(async (param) => {
+			assert.equal(param.headers?.Authorization, 'Bearer secret');
+			return searchResponse([]);
+		}, async () => {
+			assert.equal(await streamRewrite({ ...searchSettings, deepSeekSearchApiKey: ' ' }, '', null, '搜索', [], [], createSink().sink, new AbortController().signal), '完成');
+		});
+	});
+});
+
 test('search failures cancel the request instead of answering without sources', async () => {
 	const first = chunkEvent({ tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'web_search', arguments: '{"query":"x"}' } }] }, 'tool_calls') + DONE;
 	await withFetch(async () => stream([new TextEncoder().encode(first)]), async () => {
 		await withRequestUrl(async () => ({
 			status: 401,
 			headers: {},
-			text: '{"detail":{"error":"Unauthorized: missing or invalid API key."}}',
+			text: '{"error":{"message":"Unauthorized: missing or invalid API key."}}',
 		}), async () => {
 			await assert.rejects(
 				streamRewrite(searchSettings, '', null, '查一下', [], [], createSink().sink, new AbortController().signal),
@@ -398,9 +408,9 @@ test('exhausted search budget forces a final answer instead of failing the user'
 });
 
 test('search settings are validated before any request', async () => {
-	assert.match(validateSettings({ ...searchSettings, searchApiKey: ' ' }) ?? '', /搜索 API 密钥/);
-	assert.match(validateSettings({ ...searchSettings, searchEndpoint: 'http://example.test/search' }) ?? '', /HTTPS/);
-	assert.equal(validateSettings({ ...searchSettings, searchEndpoint: 'http://127.0.0.1:8080/search' }), null);
+	assert.equal(validateSettings({ ...searchSettings, deepSeekSearchApiKey: ' ' }), null);
+	assert.match(validateSettings({ ...searchSettings, deepSeekSearchEndpoint: 'http://example.test/search' }) ?? '', /HTTPS/);
+	assert.equal(validateSettings({ ...searchSettings, deepSeekSearchEndpoint: 'http://127.0.0.1:8080/search' }), null);
 	assert.match(validateSettings({ ...settings, fileReadScope: 'bad' as 'off' }) ?? '', /文件读取范围/);
 });
 

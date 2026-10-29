@@ -16,8 +16,8 @@ export interface AiSettings {
 	contextLimit: number;
 	/** 是否允许模型调用 web_search 工具检索网页。 */
 	searchEnabled: boolean;
-	searchEndpoint: string;
-	searchApiKey: string;
+	deepSeekSearchEndpoint: string;
+	deepSeekSearchApiKey: string;
 	/** 文件读取范围：off 不提供工具，vault 仅笔记库，any 允许任意本地路径；仅桌面版生效。 */
 	fileReadScope: FileReadScope;
 	/** 写作风格：concise 信息密度优先并少用装饰；generic 只沿用笔记已有形态。 */
@@ -35,8 +35,8 @@ export const DEFAULT_SETTINGS: AiSettings = {
 	reasoningEffort: 'default',
 	contextLimit: 4000,
 	searchEnabled: false,
-	searchEndpoint: DEFAULT_SEARCH_ENDPOINT,
-	searchApiKey: '',
+	deepSeekSearchEndpoint: DEFAULT_SEARCH_ENDPOINT,
+	deepSeekSearchApiKey: '',
 	fileReadScope: 'off',
 	stylePreset: 'concise',
 	styleScope: 'note',
@@ -149,23 +149,23 @@ export class AiSettingTab extends PluginSettingTab {
 				}));
 		new Setting(containerEl)
 			.setName('搜索接口地址')
-			.setDesc('默认使用官方搜索接口；已有配置不会覆盖。')
+			.setDesc('默认使用 DeepSeek 官方搜索接口；密钥会发送到此地址，请仅配置可信服务。')
 			.addText((input) => input
 				.setPlaceholder(DEFAULT_SEARCH_ENDPOINT)
-				.setValue(this.plugin.settings.searchEndpoint)
+				.setValue(this.plugin.settings.deepSeekSearchEndpoint)
 				.onChange(async (value) => {
-					this.plugin.settings.searchEndpoint = value.trim();
+					this.plugin.settings.deepSeekSearchEndpoint = value.trim();
 					await this.plugin.saveSettings();
 				}));
 		new Setting(containerEl)
 			.setName('搜索 API 密钥')
-			.setDesc('Tavily API 密钥，仅用于联网搜索；保存在本地插件 data.json（明文）。')
+			.setDesc('可选的 DeepSeek API 密钥；留空时使用下方 API 密钥。保存在本地插件 data.json（明文），旧搜索密钥不会自动使用。')
 			.addText((input) => {
 				input.inputEl.type = 'password';
 				input.setPlaceholder('输入 API 密钥')
-					.setValue(this.plugin.settings.searchApiKey)
+					.setValue(this.plugin.settings.deepSeekSearchApiKey)
 					.onChange(async (value) => {
-						this.plugin.settings.searchApiKey = value.trim();
+						this.plugin.settings.deepSeekSearchApiKey = value.trim();
 						await this.plugin.saveSettings();
 					});
 			});
